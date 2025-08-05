@@ -10,24 +10,30 @@ import { CurrenciesModule } from './currencies/currencies.module';
 
 @Module({
   imports: [
-    // 1️⃣ تحميل .env بشكل عالمي
+    // 1️⃣ تحميل متغيرات البيئة بشكل عالمي
     ConfigModule.forRoot({ isGlobal: true }),
 
-    // 2️⃣ ربط قاعدة البيانات ديناميكيًا مع .env
+    // 2️⃣ ربط قاعدة البيانات باستخدام DATABASE_URL
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        type: 'postgres',
-        host: config.get<string>('DB_HOST'),
-        port: config.get<number>('DB_PORT'),
-        username: config.get<string>('DB_USERNAME'),
-        password: config.get<string>('DB_PASSWORD'),
-        database: config.get<string>('DB_NAME'),
-        autoLoadEntities: true,
-        synchronize: true,
-        logging: ['error'],
-      }),
+      useFactory: (config: ConfigService) => {
+        const databaseUrl = config.get<string>('DATABASE_URL');
+        if (!databaseUrl) {
+          throw new Error('❌ DATABASE_URL is not defined in environment variables');
+        }
+
+        return {
+          type: 'postgres',
+          url: databaseUrl,
+          autoLoadEntities: true,
+          synchronize: true, // ⚠️ يفضل تعطيله عند رفع المشروع النهائي
+          ssl: {
+            rejectUnauthorized: false, // ✅ مهم مع Render
+          },
+          logging: ['error'], // تسجيل الأخطاء فقط
+        };
+      },
     }),
 
     // 3️⃣ باقي الموديولات
