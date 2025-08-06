@@ -53,6 +53,9 @@ pids
 *.pid.lock
 
 .env
+.env.local
+
+/uploads
 
 
 # Diagnostic reports (https://nodejs.org/api/report.html)

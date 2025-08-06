@@ -18,6 +18,9 @@ export class ProductPackage {
   @Column({ length: 100 })
   name: string;
 
+  @Column({ nullable: true })
+  imageUrl: string;
+
   // 🔹 وصف الباقة (اختياري)
   @Column({ type: 'text', nullable: true })
   description?: string;

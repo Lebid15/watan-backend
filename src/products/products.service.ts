@@ -32,6 +32,15 @@ export class ProductsService {
     private ordersRepo: Repository<ProductOrder>,
   ) {}
 
+  async updateImage(id: string, imageUrl: string): Promise<Product> {
+    const product = await this.productsRepo.findOne({ where: { id } });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+    product.imageUrl = imageUrl;
+    return this.productsRepo.save(product);
+  }
+
   // =====================================
   // 🔹 المنتجات
   // =====================================
@@ -50,7 +59,7 @@ export class ProductsService {
         basePrice: pkg.basePrice ?? pkg.capital ?? 0,
         prices: allPriceGroups.map((group) => {
           const existingPrice = pkg.prices.find(
-            (price) => price.priceGroup.id === group.id
+            (price) => price.priceGroup.id === group.id,
           );
           return {
             id: existingPrice?.id ?? null,
@@ -79,7 +88,7 @@ export class ProductsService {
         basePrice: pkg.basePrice ?? pkg.capital ?? 0,
         prices: allPriceGroups.map((group) => {
           const existingPrice = pkg.prices.find(
-            (price) => price.priceGroup.id === group.id
+            (price) => price.priceGroup.id === group.id,
           );
           return {
             id: existingPrice?.id ?? null,
@@ -122,10 +131,12 @@ export class ProductsService {
       throw new ConflictException('اسم المجموعة مطلوب');
     }
 
-    const exists = await this.priceGroupsRepo.findOne({ where: { name: data.name.trim() } });
+    const exists = await this.priceGroupsRepo.findOne({
+      where: { name: data.name.trim() },
+    });
     if (exists) throw new ConflictException('هذه المجموعة موجودة مسبقًا');
 
-    const group = this.priceGroupsRepo.create({ 
+    const group = this.priceGroupsRepo.create({
       ...data,
       name: data.name.trim(),
     });
@@ -147,7 +158,7 @@ export class ProductsService {
           where: { priceGroup: { id: group.id } },
         });
         return { id: group.id, name: group.name, usersCount };
-      })
+      }),
     );
   }
 
@@ -155,7 +166,10 @@ export class ProductsService {
   // 🔹 الباقات
   // =====================================
 
-  async addPackageToProduct(productId: string, data: Partial<ProductPackage>): Promise<ProductPackage> {
+  async addPackageToProduct(
+    productId: string,
+    data: Partial<ProductPackage>,
+  ): Promise<ProductPackage> {
     if (!data.name || !data.name.trim()) {
       throw new ConflictException('اسم الباقة مطلوب');
     }
@@ -175,6 +189,7 @@ export class ProductsService {
       basePrice: initialCapital,
       capital: initialCapital,
       isActive: data.isActive ?? true,
+      imageUrl: data.imageUrl,      // ← إضافة imageUrl
       product,
     });
 
@@ -186,7 +201,7 @@ export class ProductsService {
         package: savedPackage,
         priceGroup: group,
         price: initialCapital,
-      })
+      }),
     );
 
     await this.packagePriceRepo.save(prices);
@@ -210,7 +225,7 @@ export class ProductsService {
 
   async updatePackagePrices(
     packageId: string,
-    data: { capital: number; prices: { groupId: string; price: number }[] }
+    data: { capital: number; prices: { groupId: string; price: number }[] },
   ) {
     const pkg = await this.packagesRepo.findOne({
       where: { id: packageId },
@@ -224,7 +239,7 @@ export class ProductsService {
 
     for (const p of data.prices) {
       let priceEntity = pkg.prices.find(
-        (price) => price.priceGroup.id === p.groupId
+        (price) => price.priceGroup.id === p.groupId,
       );
 
       const priceGroup = await this.priceGroupsRepo.findOne({ where: { id: p.groupId } });
@@ -250,13 +265,7 @@ export class ProductsService {
   // 🔹 الطلبات
   // =====================================
 
-  async createOrder(data: { 
-    productId: string; 
-    packageId: string; 
-    quantity: number; 
-    userId: string;
-    userIdentifier?: string; 
-  }) {
+  async createOrder(data: { productId: string; packageId: string; quantity: number; userId: string; userIdentifier?: string }) {
     const { productId, packageId, quantity, userId, userIdentifier } = data;
 
     const product = await this.productsRepo.findOne({ where: { id: productId } });
@@ -302,8 +311,8 @@ export class ProductsService {
     return orders.map(order => ({
       id: order.id,
       status: order.status,
-      price: order.price, // ✅ أضفنا السعر
-      userIdentifier: order.userIdentifier, // ✅ أضفنا Game ID
+      price: order.price,
+      userIdentifier: order.userIdentifier,
       createdAt: order.createdAt.toISOString(),
       userEmail: order.user?.email || 'غير معروف',
       product: { id: order.product.id, name: order.product.name },
@@ -311,27 +320,24 @@ export class ProductsService {
     }));
   }
 
+  async updateOrderStatus(orderId: string, status: OrderStatus) {
+    const order = await this.ordersRepo.findOne({
+      where: { id: orderId },
+      relations: ['user'],
+    });
+    if (!order) return null;
 
-    // ✅ تحديث حالة الطلب للمشرف
-    async updateOrderStatus(orderId: string, status: OrderStatus) {
-      const order = await this.ordersRepo.findOne({
-        where: { id: orderId },
-        relations: ['user'],
-      });
-      if (!order) return null;
-
-      // إذا رفضنا الطلب، نرجع الرصيد للمستخدم
-      if (status === 'rejected' && order.status !== 'rejected') {
-        const user = order.user;
-        user.balance = Number(user.balance) + Number(order.price);
-        await this.usersRepo.save(user);
-      }
-
-      order.status = status;
-      return await this.ordersRepo.save(order);
+    if (status === 'rejected' && order.status !== 'rejected') {
+      const user = order.user;
+      user.balance = Number(user.balance) + Number(order.price);
+      await this.usersRepo.save(user);
     }
 
-    async getUserOrders(userId: string) {
+    order.status = status;
+    return await this.ordersRepo.save(order);
+  }
+
+  async getUserOrders(userId: string) {
     const orders = await this.ordersRepo.find({
       where: { user: { id: userId } },
       relations: ['product', 'package'],
@@ -348,6 +354,4 @@ export class ProductsService {
       package: { id: order.package.id, name: order.package.name },
     }));
   }
-
-
-  }
+}

@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ServeStaticModule } from '@nestjs/serve-static';
+import { join } from 'path';
 
 import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
@@ -10,33 +12,45 @@ import { CurrenciesModule } from './currencies/currencies.module';
 
 @Module({
   imports: [
-    // 1️⃣ تحميل متغيرات البيئة بشكل عالمي
-    ConfigModule.forRoot({ isGlobal: true }),
+    // 1️⃣ تقديم الملفات الثابتة من مجلد uploads عبر المسار /uploads
+    ServeStaticModule.forRoot({
+      rootPath: join(__dirname, '..', 'uploads'),
+      serveRoot: '/uploads',
+    }),
 
-    // 2️⃣ ربط قاعدة البيانات باستخدام DATABASE_URL
+    // 2️⃣ تحميل متغيرات البيئة حسب الأولوية
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: ['.env.local', '.env'],
+    }),
+
+    // 3️⃣ إعداد TypeORM بالاتصال حسب بيئة التشغيل
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
         const databaseUrl = config.get<string>('DATABASE_URL');
         if (!databaseUrl) {
-          throw new Error('❌ DATABASE_URL is not defined in environment variables');
+          throw new Error('DATABASE_URL is not defined');
         }
+
+        const nodeEnv = config.get<string>('NODE_ENV') || 'production';
+        const isProd = nodeEnv === 'production';
 
         return {
           type: 'postgres',
           url: databaseUrl,
           autoLoadEntities: true,
-          synchronize: true, // ⚠️ يفضل تعطيله عند رفع المشروع النهائي
-          ssl: {
-            rejectUnauthorized: false, // ✅ مهم مع Render
-          },
-          logging: ['error'], // تسجيل الأخطاء فقط
+          synchronize: true, // عطلها في الإنتاج إن كنت تريد
+          ssl: isProd
+            ? { rejectUnauthorized: false }
+            : false,
+          logging: ['error'],
         };
       },
     }),
 
-    // 3️⃣ باقي الموديولات
+    // 4️⃣ الموديولات الأخرى
     UserModule,
     AuthModule,
     AdminModule,

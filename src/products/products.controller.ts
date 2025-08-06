@@ -7,7 +7,13 @@ import {
   NotFoundException,
   Delete,
   Put,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { extname } from 'path';
+
 import { ProductsService } from './products.service';
 import { Product } from './product.entity';
 import { ProductPackage } from './product-package.entity';
@@ -27,7 +33,9 @@ export class ProductsController {
   }
 
   @Post('price-groups')
-  async createPriceGroup(@Body() body: Partial<PriceGroup>): Promise<PriceGroup> {
+  async createPriceGroup(
+    @Body() body: Partial<PriceGroup>
+  ): Promise<PriceGroup> {
     return this.productsService.createPriceGroup(body);
   }
 
@@ -86,19 +94,62 @@ export class ProductsController {
   }
 
   // =====================================
-  // 🔹 الباقات
+  // 🔹 الباقات (إنشاء مع رفع صورة)
   // =====================================
+    // 🔹 رفع صورة المنتج
+  @Post(':id/image')
+  @UseInterceptors(
+    FileInterceptor('image', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (req, file, cb) => {
+          const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          const ext = extname(file.originalname);
+          cb(null, `product-${unique}${ext}`);
+        },
+      }),
+    }),
+  )
+  async uploadProductImage(
+    @Param('id') id: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new NotFoundException('لم يتم تقديم ملف');
+    const imageUrl = `/uploads/${file.filename}`;
+    return this.productsService.updateImage(id, imageUrl);
+  }
+
 
   @Post(':id/packages')
+  @UseInterceptors(
+    FileInterceptor('image', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          const fileExt = extname(file.originalname);
+          cb(null, `package-${uniqueSuffix}${fileExt}`);
+        },
+      }),
+    }),
+  )
   async addPackage(
     @Param('id') productId: string,
-    @Body() body: Partial<ProductPackage>
+    @UploadedFile() file: Express.Multer.File,
+    @Body('name') name: string,
   ): Promise<ProductPackage> {
-    return this.productsService.addPackageToProduct(productId, body);
+    if (!name) throw new NotFoundException('اسم الباقة مطلوب');
+    const imageUrl = file ? `/uploads/${file.filename}` : undefined;
+    return this.productsService.addPackageToProduct(productId, {
+      name,
+      imageUrl,
+    });
   }
 
   @Delete('packages/:id')
-  async deletePackage(@Param('id') id: string): Promise<{ message: string }> {
+  async deletePackage(
+    @Param('id') id: string,
+  ): Promise<{ message: string }> {
     await this.productsService.deletePackage(id);
     return { message: 'تم حذف الباقة بنجاح' };
   }
@@ -107,8 +158,9 @@ export class ProductsController {
   async updatePackagePrices(
     @Param('id') packageId: string,
     @Body()
-    body: { capital: number; prices: { groupId: string; price: number }[] }
+    body: { capital: number; prices: { groupId: string; price: number }[] },
   ) {
     return this.productsService.updatePackagePrices(packageId, body);
   }
+
 }
