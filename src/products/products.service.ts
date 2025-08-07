@@ -276,6 +276,14 @@ export class ProductsService {
     if (!user) throw new NotFoundException('المستخدم غير موجود');
 
     const price = Number(pkg.basePrice) * quantity;
+    console.log('🔍 محاولة إنشاء طلب');
+    console.log(`🧾 رصيد المستخدم: ${user.balance}`);
+    console.log(`🧾 سعر الباقة: ${pkg.basePrice}`);
+    console.log(`🧾 الكمية المطلوبة: ${quantity}`);
+    console.log(`🧾 السعر النهائي المطلوب: ${Number(pkg.basePrice) * quantity}`);
+    console.log(`📌 userId المستلم: ${userId}`);
+    console.log(`👤 المستخدم الذي جلب من قاعدة البيانات:`, user);
+
 
     if (Number(user.balance) < price) {
       throw new ConflictException('الرصيد غير كافٍ');

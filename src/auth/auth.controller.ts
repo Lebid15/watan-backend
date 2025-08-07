@@ -1,4 +1,5 @@
 // src/auth/auth.controller.ts
+
 import {
   Controller,
   Post,
@@ -8,7 +9,6 @@ import {
 import { ApiTags, ApiBody, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { CreateUserDto } from '../user/dto/create-user.dto';
-import { User } from '../user/user.entity'; // ✅ لاستدعاء نوع المستخدم
 
 class LoginDto {
   email: string;
@@ -21,9 +21,9 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('login')
-  @ApiOperation({ summary: 'User login' })
-  @ApiResponse({ status: 201, description: 'Login successful' })
-  @ApiResponse({ status: 401, description: 'Invalid credentials' })
+  @ApiOperation({ summary: 'تسجيل الدخول' })
+  @ApiResponse({ status: 201, description: 'تم تسجيل الدخول بنجاح' })
+  @ApiResponse({ status: 401, description: 'بيانات غير صحيحة' })
   @ApiBody({ type: LoginDto })
   async login(@Body() body: LoginDto) {
     const user = await this.authService.validateUser(body.email, body.password);
@@ -32,21 +32,15 @@ export class AuthController {
       throw new UnauthorizedException('بيانات تسجيل الدخول غير صحيحة');
     }
 
-    const { access_token, user: baseUser } = await this.authService.login(user);
+    const { access_token } = await this.authService.login(user);
 
-    return {
-      token: access_token, // ✅ هنا أصبح متوافق مع الفرونت
-      user: {
-        ...baseUser,
-        priceGroupId: user.priceGroup?.id || null,
-      },
-    };
-
+    // ✅ نعيد فقط التوكن، وجلب بيانات المستخدم سيكون من /users/profile
+    return { token: access_token };
   }
 
   @Post('register')
-  @ApiOperation({ summary: 'Register a new user' })
-  @ApiResponse({ status: 201, description: 'User registered successfully' })
+  @ApiOperation({ summary: 'إنشاء حساب جديد' })
+  @ApiResponse({ status: 201, description: 'تم إنشاء الحساب بنجاح' })
   async register(@Body() body: CreateUserDto) {
     return this.authService.register(body);
   }
