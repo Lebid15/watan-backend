@@ -17,6 +17,7 @@ import { PackagePrice } from './package-price.entity';
 import { PriceGroup } from './price-group.entity';
 import { User } from '../user/user.entity';
 import { ProductOrder } from './product-order.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { ProductOrder } from './product-order.entity';
       User,
       ProductOrder,
     ]),
+    NotificationsModule,
   ],
   controllers: [
     ProductsController,

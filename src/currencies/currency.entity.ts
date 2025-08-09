@@ -1,4 +1,3 @@
-// src/currencies/currency.entity.ts
 import { Entity, PrimaryGeneratedColumn, Column } from 'typeorm';
 
 @Entity('currencies')
@@ -20,4 +19,7 @@ export class Currency {
 
   @Column({ default: false })
   isPrimary: boolean; // هل هي العملة الأساسية
+
+  @Column({ nullable: true })
+  symbolAr: string; // الرمز العربي — مثال: "ل.س", "د.إ"
 }

@@ -9,27 +9,28 @@ import { UserService } from '../user/user.service';
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(private readonly userService: UserService) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(), // ✅ أخذ التوكن من Authorization: Bearer
-      ignoreExpiration: false, // ✅ لا تتجاهل انتهاء الصلاحية
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ignoreExpiration: false,
       secretOrKey: jwtConstants.secret,
     });
   }
 
   async validate(payload: any) {
-
-    // payload يجب أن يحتوي على sub = user.id
-    const userId = payload.sub;
-    if (!userId) {
-      console.error('❌ JWT payload لا يحتوي على sub (معرف المستخدم)');
-      throw new UnauthorizedException();
+    if (!payload.sub) {
+      throw new UnauthorizedException('Invalid token payload: missing sub');
     }
 
-    const user = await this.userService.findById(userId);
+    const user = await this.userService.findById(payload.sub, ['currency']);
     if (!user) {
-      console.error('❌ المستخدم غير موجود في قاعدة البيانات');
-      throw new UnauthorizedException();
+      throw new UnauthorizedException('User not found');
     }
 
-    return user; // سيتم وضعه في req.user تلقائيًا
+    // نرجع بيانات محددة فقط
+    return {
+      id: user.id, // UUID صحيح من قاعدة البيانات
+      email: user.email,
+      role: user.role,
+      currencyId: user.currency?.id || null,
+    };
   }
 }

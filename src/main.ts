@@ -39,13 +39,11 @@ async function bootstrap() {
   // ✅ استخدم PORT من البيئة أو 3001 محليًا
   const port = process.env.PORT || 3001;
   await app.listen(port, '0.0.0.0');
-  console.log(`🚀 Server is running on port ${port}`);
 
   // ✅ اختبار الاتصال بقاعدة البيانات
   const dataSource = app.get(DataSource);
   try {
     await dataSource.query('SELECT NOW()');
-    console.log('✅ Database connection successful!');
   } catch (error) {
     console.error('❌ Database connection failed:', error.message);
   }

@@ -18,6 +18,8 @@ import { ProductsService } from './products.service';
 import { Product } from './product.entity';
 import { ProductPackage } from './product-package.entity';
 import { PriceGroup } from './price-group.entity';
+import { UseGuards, Req } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 
 @Controller('products')
 export class ProductsController {
@@ -161,6 +163,20 @@ export class ProductsController {
     body: { capital: number; prices: { groupId: string; price: number }[] },
   ) {
     return this.productsService.updatePackagePrices(packageId, body);
+  }
+
+  // ✅ المنتجات مع الأسعار بعملة المستخدم
+  @UseGuards(AuthGuard('jwt'))
+  @Get('user')
+  async getAllForUser(@Req() req) {
+    return this.productsService.findAllForUser(req.user.id);
+  }
+
+    // ✅ منتج واحد مع الأسعار بعملة المستخدم
+  @UseGuards(AuthGuard('jwt'))
+  @Get('user/:id')
+  async getOneForUser(@Param('id') id: string, @Req() req) {
+    return this.productsService.findOneForUser(id, req.user.id);
   }
 
 }

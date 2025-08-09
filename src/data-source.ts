@@ -1,27 +1,28 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
+import * as dotenv from 'dotenv';
 
-import { Product } from './products/product.entity';
-import { ProductPackage } from './products/product-package.entity';
-import { PriceGroup } from './products/price-group.entity';
-import { PackagePrice } from './products/package-price.entity';
-import { User } from './user/user.entity';
+dotenv.config({ path: process.env.NODE_ENV === 'production' ? '.env' : '.env.local' });
+const isProd = process.env.NODE_ENV === 'production';
 
-export const AppDataSource = new DataSource({
+const dataSource = new DataSource({
   type: 'postgres',
-  host: 'localhost',
-  port: 5432,
-  username: 'postgres',
-  password: 'Asdf1212asdf.',   // ✅ كلمة مرورك الحالية
-  database: 'watan',           // ✅ اسم قاعدة البيانات
-  synchronize: false,          // نستخدم migrations فقط
-  logging: true,
-  entities: [
-    User,
-    Product,
-    ProductPackage,
-    PackagePrice,
-    PriceGroup,
-  ],
+  ...(isProd
+    ? {
+        url: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false },
+      }
+    : {
+        host: process.env.DB_HOST ?? 'localhost',
+        port: Number(process.env.DB_PORT ?? 5432),
+        username: process.env.DB_USER ?? process.env.DB_USERNAME ?? 'postgres',
+        password: String(process.env.DB_PASS ?? process.env.DB_PASSWORD ?? ''),
+        database: process.env.DB_NAME ?? 'watan',
+        // لا نحتاج SSL محلياً
+      }),
+  entities: ['src/**/*.entity.ts'],
   migrations: ['src/migrations/*.ts'],
+  synchronize: false,
 });
+
+export default dataSource;

@@ -1,7 +1,7 @@
-import { 
-  Controller, Post, Put, Get, Delete, Patch,  
+import {
+  Controller, Post, Put, Get, Delete, Patch,
   Body, ConflictException, BadRequestException,
-  UseGuards, Param, ParseUUIDPipe, NotFoundException, Request 
+  UseGuards, Param, ParseUUIDPipe, NotFoundException, Request, Req
 } from '@nestjs/common';
 import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -9,41 +9,31 @@ import { UpdateUserDto, UserRole } from './dto/update-user.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
-import { 
-  ApiTags, ApiBearerAuth, ApiOperation, 
-  ApiResponse, ApiParam 
-} from '@nestjs/swagger';
+import { AuthGuard } from '@nestjs/passport';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 
 @ApiTags('Users')
 @Controller('users')
 export class UserController {
   constructor(private readonly userService: UserService) {}
 
-  // -------------------------
-  // تسجيل مستخدم جديد
-  // -------------------------
   @Post('register')
   @ApiOperation({ summary: 'Register a new user' })
-  @ApiResponse({ status: 201, description: 'User registered successfully.' })
-  @ApiResponse({ status: 409, description: 'Email already in use.' })
-  @ApiResponse({ status: 400, description: 'Invalid data.' })
   async register(@Body() createUserDto: CreateUserDto) {
-    if (!createUserDto.email || !createUserDto.password) {
-      throw new BadRequestException('Email and password are required');
+    if (!createUserDto.email || !createUserDto.password || !createUserDto.currencyId) {
+      throw new BadRequestException('Email, password and currencyId are required');
     }
-
     const existingUser = await this.userService.findByEmail(createUserDto.email);
-    if (existingUser) {
-      throw new ConflictException('Email already in use');
-    }
+    if (existingUser) throw new ConflictException('Email already in use');
 
     const user = await this.userService.createUser(createUserDto);
-    return { id: user.id, email: user.email };
+    return {
+      id: user.id,
+      email: user.email,
+      currency: user.currency ? { id: user.currency.id, code: user.currency.code } : null,
+    };
   }
 
-  // -------------------------
-  // عرض بروفايل المستخدم الحالي (JWT)
-  // -------------------------
   @Get('profile')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
@@ -55,53 +45,52 @@ export class UserController {
     const { password, ...rest } = user;
     return {
       ...rest,
-      priceGroup: user.priceGroup
-        ? { id: user.priceGroup.id, name: user.priceGroup.name }
-        : null,
+      currency: user.currency ? { id: user.currency.id, code: user.currency.code } : null,
+      priceGroup: user.priceGroup ? { id: user.priceGroup.id, name: user.priceGroup.name } : null,
     };
   }
 
-  // -------------------------
-  // جلب كل المستخدمين مع مجموعة الأسعار (للمشرف)
-  // -------------------------
   @Get('with-price-group')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get all users with their price group (Admin only)' })
   async findAllWithPriceGroup() {
     return this.userService.findAllWithPriceGroup();
   }
 
-  // -------------------------
-  // عرض جميع المستخدمين (للمشرف)
-  // -------------------------
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get all users (Admin only)' })
   async findAll() {
     const users = await this.userService.findAllUsers();
     return users.map(user => ({
       id: user.id,
       email: user.email,
-      balance: user.balance,
+      username: user.username ?? null,
+      balance: Number(user.balance),
       role: user.role,
-      priceGroup: user.priceGroup
-        ? { id: user.priceGroup.id, name: user.priceGroup.name }
-        : null,
+      isActive: !!user.isActive,
+      overdraftLimit: Number(user.overdraftLimit ?? 0),
+      currency: user.currency ? { id: user.currency.id, code: user.currency.code } : null,
+      priceGroup: user.priceGroup ? { id: user.priceGroup.id, name: user.priceGroup.name } : null,
+      fullName: user.fullName ?? null,
+      phoneNumber: user.phoneNumber ?? null,
     }));
   }
 
-  // -------------------------
-  // جلب مستخدم محدد بالمعرف (للمشرف)
-  // -------------------------
+  @UseGuards(AuthGuard('jwt'))
+  @Get('profile-with-currency')
+  async getProfileWithCurrency(@Req() req) {
+    const userId = req.user.id ?? req.user.sub;
+    if (!userId) throw new BadRequestException('User ID is missing in token');
+    return this.userService.getProfileWithCurrency(userId);
+  }
+
   @Get(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get user by id (Admin only)' })
   @ApiParam({ name: 'id', description: 'UUID of the user to retrieve' })
   async findById(@Param('id', ParseUUIDPipe) id: string) {
     const user = await this.userService.findById(id);
@@ -109,17 +98,19 @@ export class UserController {
     return {
       id: user.id,
       email: user.email,
-      balance: user.balance,
+      username: user.username ?? null,
+      balance: Number(user.balance),
       role: user.role,
-      priceGroup: user.priceGroup
-        ? { id: user.priceGroup.id, name: user.priceGroup.name }
-        : null,
+      isActive: !!user.isActive,
+      overdraftLimit: Number(user.overdraftLimit ?? 0),
+      currency: user.currency ? { id: user.currency.id, code: user.currency.code } : null,
+      priceGroup: user.priceGroup ? { id: user.priceGroup.id, name: user.priceGroup.name } : null,
+      fullName: user.fullName ?? null,
+      phoneNumber: user.phoneNumber ?? null,
+      countryCode: user.countryCode ?? null,
     };
   }
 
-  // -------------------------
-  // تحديث بيانات مستخدم (للمشرف)
-  // -------------------------
   @Put(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
@@ -129,24 +120,20 @@ export class UserController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateUserDto: UpdateUserDto,
   ) {
-    return this.userService.updateUser(id, updateUserDto);
+    if (updateUserDto.balance !== undefined) {
+      updateUserDto.balance = Number(updateUserDto.balance);
+    }
+    return this.userService.updateUser(id, updateUserDto as any);
   }
 
-  // -------------------------
-  // حذف مستخدم (للمشرف)
-  // -------------------------
   @Delete(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Delete user (Admin only)' })
   async deleteUser(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
     await this.userService.deleteUser(id);
   }
 
-  // -------------------------
-// تحديث مجموعة الأسعار للمستخدم (للمشرف)
-// -------------------------
   @Patch(':id/price-group')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
@@ -158,4 +145,53 @@ export class UserController {
     return this.userService.updateUserPriceGroup(userId, groupId);
   }
 
+  // ====== المسارات الجديدة للوحة المشرف ======
+
+  // تفعيل/تعطيل
+  @Patch(':id/active')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth()
+  async setActive(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('isActive') isActive: boolean,
+  ) {
+    return this.userService.setActive(id, !!isActive);
+  }
+
+  // إضافة رصيد (+)
+  @Patch(':id/balance/add')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth()
+  async addFunds(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('amount') amount: number,
+  ) {
+    return this.userService.addFunds(id, Number(amount));
+  }
+  
+  // تغيير كلمة السر
+  @Patch(':id/password')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth()
+  async setPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('password') password: string,
+  ) {
+    return this.userService.setPassword(id, password);
+  }
+
+  // حد السالب
+  @Patch(':id/overdraft')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth()
+  async setOverdraft(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('overdraftLimit') overdraftLimit: number,
+  ) {
+    return this.userService.setOverdraft(id, Number(overdraftLimit));
+  }
 }

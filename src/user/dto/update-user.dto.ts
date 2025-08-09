@@ -1,10 +1,8 @@
-// src/users/dto/update-user.dto.ts
-import { IsOptional, IsString, IsNumber, IsEnum } from 'class-validator';
+import { IsOptional, IsString, IsNumber, IsEnum, IsUUID, IsBoolean } from 'class-validator';
 
 export enum UserRole {
   USER = 'user',
   ADMIN = 'admin',
-  // أدوار أخرى حسب المشروع
 }
 
 export class UpdateUserDto {
@@ -14,7 +12,7 @@ export class UpdateUserDto {
 
   @IsOptional()
   @IsNumber()
-  balance?: number;
+  balance?: number; // مع أن الواجهة لن تستخدمه، نتركه متاحًا
 
   @IsOptional()
   @IsString()
@@ -22,5 +20,21 @@ export class UpdateUserDto {
 
   @IsOptional()
   @IsString()
+  countryCode?: string;
+
+  @IsOptional()
+  @IsString()
   fullName?: string;
+
+  @IsOptional()
+  @IsString()
+  username?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @IsOptional()
+  @IsUUID()
+  currencyId?: string;
 }

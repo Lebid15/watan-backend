@@ -1,17 +1,13 @@
-// src/auth/auth.controller.ts
-
-import {
-  Controller,
-  Post,
-  Body,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Controller, Post, Body, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { ApiTags, ApiBody, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { CreateUserDto } from '../user/dto/create-user.dto';
 
 class LoginDto {
-  email: string;
+  // نقبل أي واحد من الثلاثة
+  emailOrUsername?: string;
+  email?: string;
+  username?: string;
   password: string;
 }
 
@@ -21,20 +17,20 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('login')
-  @ApiOperation({ summary: 'تسجيل الدخول' })
+  @ApiOperation({ summary: 'تسجيل الدخول بالبريد أو اسم المستخدم' })
   @ApiResponse({ status: 201, description: 'تم تسجيل الدخول بنجاح' })
   @ApiResponse({ status: 401, description: 'بيانات غير صحيحة' })
   @ApiBody({ type: LoginDto })
   async login(@Body() body: LoginDto) {
-    const user = await this.authService.validateUser(body.email, body.password);
-
-    if (!user) {
-      throw new UnauthorizedException('بيانات تسجيل الدخول غير صحيحة');
+    const emailOrUsername = body.emailOrUsername ?? body.email ?? body.username;
+    if (!emailOrUsername || !body.password) {
+      throw new BadRequestException('يرجى إرسال emailOrUsername أو email أو username مع password');
     }
 
-    const { access_token } = await this.authService.login(user);
+    const user = await this.authService.validateByEmailOrUsername(emailOrUsername, body.password);
+    if (!user) throw new UnauthorizedException('بيانات تسجيل الدخول غير صحيحة');
 
-    // ✅ نعيد فقط التوكن، وجلب بيانات المستخدم سيكون من /users/profile
+    const { access_token } = await this.authService.login(user);
     return { token: access_token };
   }
 
