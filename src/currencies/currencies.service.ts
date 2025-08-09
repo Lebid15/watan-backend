@@ -12,7 +12,7 @@ export class CurrenciesService {
 
   /** جلب جميع العملات */
   async findAll(): Promise<Currency[]> {
-    return this.currenciesRepo.find();
+    return this.currenciesRepo.find({ order: { code: 'ASC' } });
   }
 
   /** إنشاء عملة جديدة */
@@ -73,5 +73,27 @@ export class CurrenciesService {
     }
 
     return results;
+  }
+
+  /** ✅ زرع العملات الأساسية مرة واحدة (لن تُنشأ المكررة) */
+  async seedDefaults(): Promise<Currency[]> {
+    const defaults: Array<Partial<Currency>> = [
+      { code: 'USD', name: 'US Dollar',         symbolAr: '$',  isActive: true, rate: 1 },
+      { code: 'EUR', name: 'Euro',              symbolAr: '€',  isActive: true, rate: 1 },
+      { code: 'TRY', name: 'Turkish Lira',      symbolAr: '₺',  isActive: true, rate: 1 },
+      { code: 'EGP', name: 'Egyptian Pound',    symbolAr: '£',  isActive: true, rate: 1 },
+      { code: 'SAR', name: 'Saudi Riyal',       symbolAr: '﷼',  isActive: true, rate: 1 },
+      { code: 'AED', name: 'UAE Dirham',        symbolAr: 'د.إ', isActive: true, rate: 1 },
+      { code: 'SYP', name: 'Syrian Pound',      symbolAr: 'ل.س', isActive: true, rate: 1 },
+    ];
+
+    for (const c of defaults) {
+      const exists = await this.currenciesRepo.findOne({ where: { code: c.code as string } });
+      if (!exists) {
+        await this.currenciesRepo.save(this.currenciesRepo.create(c));
+      }
+    }
+
+    return this.findAll();
   }
 }

@@ -1,53 +1,49 @@
-import { Controller, Get, Post, Body, Put, Param, Delete } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, BadRequestException } from '@nestjs/common';
 import { CurrenciesService } from './currencies.service';
 import { Currency } from './currency.entity';
 
 @Controller('currencies')
 export class CurrenciesController {
-  constructor(private readonly currenciesService: CurrenciesService) {}
+  constructor(private readonly service: CurrenciesService) {}
 
+  /** إرجاع كل العملات */
   @Get()
-  findAll(): Promise<Currency[]> {
-    return this.currenciesService.findAll();
+  async findAll(): Promise<Currency[]> {
+    return this.service.findAll();
   }
 
+  /** إنشاء عملة جديدة */
   @Post()
-  create(@Body() currency: Partial<Currency>): Promise<Currency> {
-    const allowed: Partial<Currency> = {
-      name: currency.name,
-      code: currency.code,
-      rate: currency.rate,
-      isActive: currency.isActive,
-      isPrimary: currency.isPrimary,
-      symbolAr: currency.symbolAr,
-    };
-    return this.currenciesService.create(allowed);
+  async create(@Body() body: Partial<Currency>): Promise<Currency> {
+    return this.service.create(body);
   }
 
-  // ✅ التحديث الجماعي — يستقبل { currencies: [...] }
+    /** ✅ التحديث الجماعي كما كان: PUT /currencies/bulk-update */
   @Put('bulk-update')
-  async bulkUpdate(@Body() body: { currencies: Partial<Currency>[] }) {
-    if (!body || !Array.isArray(body.currencies)) {
-      throw new Error('⚠ البيانات المرسلة يجب أن تكون بالشكل { currencies: [...] }');
+  async bulkUpdate(@Body() body: any): Promise<Currency[]> {
+    const list: Partial<Currency>[] = Array.isArray(body) ? body : body?.currencies;
+    if (!Array.isArray(list)) {
+      throw new BadRequestException('Body must be an array of currencies or { currencies: [...] }');
     }
-    return this.currenciesService.bulkUpdate(body.currencies);
+    return this.service.bulkUpdate(list);
   }
 
-  @Delete(':id')
-  remove(@Param('id') id: string): Promise<boolean> {
-    return this.currenciesService.remove(id);
-  }
-
+  /** تحديث عملة واحدة */
   @Put(':id')
-  update(@Param('id') id: string, @Body() currency: Partial<Currency>): Promise<Currency> {
-    const allowed: Partial<Currency> = {
-      name: currency.name,
-      code: currency.code,
-      rate: currency.rate,
-      isActive: currency.isActive,
-      isPrimary: currency.isPrimary,
-      symbolAr: currency.symbolAr,
-    };
-    return this.currenciesService.update(id, allowed);
+  async update(@Param('id') id: string, @Body() body: Partial<Currency>): Promise<Currency> {
+    return this.service.update(id, body);
+  }
+
+  /** حذف عملة */
+  @Delete(':id')
+  async remove(@Param('id') id: string): Promise<{ ok: boolean }> {
+    const ok = await this.service.remove(id);
+    return { ok };
+  }
+
+  /** ✅ زرع العملات الافتراضية (مرة واحدة) */
+  @Post('seed-defaults')
+  async seedDefaults(): Promise<Currency[]> {
+    return this.service.seedDefaults();
   }
 }

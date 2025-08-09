@@ -9,9 +9,6 @@ import { CurrenciesService } from './currencies.service';
   imports: [TypeOrmModule.forFeature([Currency])],
   controllers: [CurrenciesController],
   providers: [CurrenciesService],
-  exports: [
-    CurrenciesService,
-    TypeOrmModule, // ✅ تصدير TypeOrmModule ليتمكن أي Module آخر من حقن CurrencyRepository
-  ],
+  exports: [CurrenciesService, TypeOrmModule],
 })
 export class CurrenciesModule {}
