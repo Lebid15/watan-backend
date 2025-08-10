@@ -26,3 +26,29 @@ const dataSource = new DataSource({
 });
 
 export default dataSource;
+
+// --- CLI runner (minimal) ---
+if (require.main === module) {
+  const cmd = process.argv[2]; // "migration:run" | "migration:show" | "migration:revert"
+  dataSource
+    .initialize()
+    .then(async () => {
+      if (cmd === 'migration:run') {
+        await dataSource.runMigrations();
+        console.log('✅ Migrations ran.');
+      } else if (cmd === 'migration:revert') {
+        await dataSource.undoLastMigration();
+        console.log('↩️ Migration reverted.');
+      } else if (cmd === 'migration:show') {
+        const hasPending = await dataSource.showMigrations();
+        console.log('ℹ️ Pending migrations?', hasPending);
+      } else {
+        console.log('Usage: ts-node ./src/data-source.ts migration:run | migration:show | migration:revert');
+      }
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error('Migration error:', err);
+      process.exit(1);
+    });
+}
