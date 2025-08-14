@@ -24,7 +24,8 @@ import { PaymentsModule } from './payments/payments.module';
     // متغيرات البيئة
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: ['.env.local', '.env'],
+      envFilePath:
+        process.env.NODE_ENV === 'development' ? '.env.local' : '.env',
     }),
 
     // TypeORM
