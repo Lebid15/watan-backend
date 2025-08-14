@@ -359,4 +359,41 @@ export class IntegrationsService {
       message: 'تم تحديث تكلفة المزود لهذه الباقة.',
     };
   }
+
+  // حذف مزوّد + تنظيف البيانات التابعة له
+  async deleteIntegration(id: string) {
+    const cfg = await this.integrationRepo.findOne({ where: { id } });
+    if (!cfg) throw new NotFoundException('Integration not found');
+
+    // 1) احذف أي ربط باقات لهذا المزوّد
+    await this.packageMappingsRepo.delete({ provider_api_id: id });
+
+    // 2) احذف تكاليف هذا المزوّد (إن وُجدت)
+    await this.costRepo.delete({ providerId: id });
+
+    // 3) (لا حاجة للمساس بالـ routing لأنه مربوط بالباقة فقط، ليس بالمزوّد)
+
+    // 4) احذف المزوّد نفسه
+    await this.integrationRepo.delete(id);
+
+    return { ok: true };
+  }
+
+    // تحديث مزود
+  async updateIntegration(
+    id: string,
+    dto: {
+      name?: string;
+      provider?: 'barakat' | 'apstore' | 'znet';
+      baseUrl?: string;
+      apiToken?: string;
+      kod?: string;
+      sifre?: string;
+    },
+  ) {
+    const cfg = await this.get(id);
+    Object.assign(cfg, dto);
+    return this.integrationRepo.save(cfg);
+  }
+
 }

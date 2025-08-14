@@ -15,11 +15,13 @@ import { ProductsModule } from '../products/products.module';
 import { ProductOrder } from '../products/product-order.entity';
 import { Currency } from '../currencies/currency.entity';
 import { User } from '../user/user.entity';
+import { IntegrationsModule } from '../integrations/integrations.module';
 
 @Module({
   imports: [
     UserModule,
     ProductsModule, // ✅ يجعل AccountingPeriodsService متاحًا هنا
+    IntegrationsModule,
     TypeOrmModule.forFeature([ProductOrder, Currency, User]),
   ],
   controllers: [AdminController, UploadController, ReportsAdminController],

@@ -1,7 +1,8 @@
 // src/integrations/integrations.controller.ts
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Put, Delete, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { IntegrationsService } from './integrations.service';
 import { CreateIntegrationDto } from './dto/create-integration.dto';
+import { UpdateIntegrationDto } from './dto/update-integration.dto';
 import { PlaceOrderDto } from './dto/place-order.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -22,6 +23,24 @@ export class IntegrationsController {
   @Get()
   list() {
     return this.svc.list();
+  }
+
+  // ⬇️ جديد: جلب مزود واحد بالتعريف
+  @Get(':id')
+  getOne(@Param('id') id: string) {
+    return this.svc.get(id);
+  }
+
+  // ⬇️ جديد: تعديل مزود
+  @Put(':id')
+  updateOne(@Param('id') id: string, @Body() dto: UpdateIntegrationDto) {
+    return this.svc.updateIntegration(id, dto);
+  }
+
+  // ⬇️ جديد: حذف مزود
+  @Delete(':id')
+  deleteOne(@Param('id') id: string) {
+    return this.svc.deleteIntegration(id);
   }
 
   @Post(':id/test')
@@ -46,11 +65,10 @@ export class IntegrationsController {
 
   @Get(':id/orders/status')
   status(@Param('id') id: string, @Query('ids') ids: string) {
-    const arr = (ids || '').split(',').map(s => s.trim()).filter(Boolean);
+    const arr = (ids || '').split(',').map((s) => s.trim()).filter(Boolean);
     return this.svc.checkOrders(id, arr);
   }
 
-  // ===== ربط باقاتنا بباقات المزود المحدد (موجودة سابقًا) =====
   @Get(':id/packages')
   getPackages(@Param('id') id: string, @Query('product') product?: string) {
     return this.svc.getIntegrationPackages(id, product);
@@ -64,15 +82,12 @@ export class IntegrationsController {
     return this.svc.savePackageMappings(id, body);
   }
 
-  // ====== جديد: صفحة “توجيه الباقات” العامة ======
-
-  /** قائمة شاملة للباقات مع إعدادات التوجيه + المزوّدين + التكاليف */
+  // ===== توجيه الباقات / التكاليف
   @Get('routing/all')
   getRoutingAll(@Query('q') q?: string) {
     return this.svc.getRoutingAll(q);
   }
 
-  /** حفظ فوري لحقل التوجيه (primary | fallback) لباقة واحدة */
   @Post('routing/set')
   setRoutingField(
     @Body() body: { packageId: string; which: 'primary' | 'fallback'; providerId: string | null },
@@ -80,11 +95,8 @@ export class IntegrationsController {
     return this.svc.setRoutingField(body.packageId, body.which, body.providerId);
   }
 
-  /** جلب/تحديث تكلفة المزوّد لباقة (يعتمد على وجود Mapping) */
   @Post('provider-cost')
-  refreshProviderCost(
-    @Body() body: { packageId: string; providerId: string },
-  ) {
+  refreshProviderCost(@Body() body: { packageId: string; providerId: string }) {
     return this.svc.refreshProviderCost(body.packageId, body.providerId);
   }
 }
