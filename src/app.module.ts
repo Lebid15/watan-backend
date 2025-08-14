@@ -15,7 +15,7 @@ import { PaymentsModule } from './payments/payments.module';
 
 @Module({
   imports: [
-    // تقديم الملفات الثابتة
+    // تقديم الملفات الثابتة (لرفع الملفات محليًا عند التطوير)
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', 'uploads'),
       serveRoot: '/uploads',
@@ -28,7 +28,7 @@ import { PaymentsModule } from './payments/payments.module';
         process.env.NODE_ENV === 'development' ? '.env.local' : '.env',
     }),
 
-    // TypeORM
+    // إعداد TypeORM مع دعم Render و SSL
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -43,14 +43,15 @@ import { PaymentsModule } from './payments/payments.module';
           type: 'postgres',
           url: databaseUrl,
           autoLoadEntities: true,
-          synchronize: true, // عطّلها في الإنتاج إذا تعتمد على migrations
+          synchronize: true, // عطّلها في الإنتاج إذا تستخدم migrations
           ssl: isProd ? { rejectUnauthorized: false } : false,
+          extra: isProd ? { ssl: { rejectUnauthorized: false } } : undefined,
           logging: ['error'],
         };
       },
     }),
 
-    // ✅ Scheduler لاستخدام polling كل 5s لاحقًا
+    // ✅ Scheduler لاستخدام polling لاحقًا
     ScheduleModule.forRoot(),
 
     // الموديولات
