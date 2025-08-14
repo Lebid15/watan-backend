@@ -18,10 +18,10 @@ const dataSource = new DataSource({
         username: process.env.DB_USER ?? process.env.DB_USERNAME ?? 'postgres',
         password: String(process.env.DB_PASS ?? process.env.DB_PASSWORD ?? ''),
         database: process.env.DB_NAME ?? 'watan',
-        // لا نحتاج SSL محلياً
       }),
-  entities: ['src/**/*.entity.ts'],
-  migrations: ['src/migrations/*.ts'],
+  // 👇 مهم: src أثناء التطوير، dist أثناء الإنتاج
+  entities: [isProd ? 'dist/**/*.entity.js' : 'src/**/*.entity.ts'],
+  migrations: [isProd ? 'dist/migrations/*.js' : 'src/migrations/*.ts'],
   synchronize: false,
 });
 
@@ -43,7 +43,10 @@ if (require.main === module) {
         const hasPending = await dataSource.showMigrations();
         console.log('ℹ️ Pending migrations?', hasPending);
       } else {
-        console.log('Usage: ts-node ./src/data-source.ts migration:run | migration:show | migration:revert');
+        console.log(
+          'Usage (DEV):   npx ts-node ./src/data-source.ts migration:run | migration:show | migration:revert\n' +
+          'Usage (PROD):  node ./dist/data-source.js migration:run | migration:show | migration:revert'
+        );
       }
       process.exit(0);
     })

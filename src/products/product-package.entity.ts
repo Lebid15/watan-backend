@@ -1,10 +1,11 @@
-import { 
-  Entity, 
-  PrimaryGeneratedColumn, 
-  Column, 
-  ManyToOne, 
-  OneToMany, 
-  JoinColumn 
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  ManyToOne,
+  OneToMany,
+  JoinColumn,
+  Index,
 } from 'typeorm';
 import { Product } from './product.entity';
 import { PackagePrice } from './package-price.entity';
@@ -13,6 +14,11 @@ import { PackagePrice } from './package-price.entity';
 export class ProductPackage {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  /** كود ربط عام — لربط الشركاء مستقبلًا */
+  @Index('ux_product_packages_public_code', { unique: true })
+  @Column({ type: 'varchar', length: 40, nullable: true })
+  publicCode: string | null;
 
   // 🔹 اسم الباقة
   @Column({ length: 100 })

@@ -3,32 +3,31 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
+import { ScheduleModule } from '@nestjs/schedule';
 
 import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
 import { ProductsModule } from './products/products.module';
 import { CurrenciesModule } from './currencies/currencies.module';
-
-// ✅ الإضافة الجديدة
+import { IntegrationsModule } from './integrations/integrations.module';
 import { PaymentsModule } from './payments/payments.module';
 
 @Module({
   imports: [
-    // 1️⃣ تقديم الملفات الثابتة من مجلد uploads عبر المسار /uploads
+    // تقديم الملفات الثابتة
     ServeStaticModule.forRoot({
-      // من dist -> نطلع مستوى لمجلد المشروع ثم ندخل على uploads
       rootPath: join(__dirname, '..', 'uploads'),
       serveRoot: '/uploads',
     }),
 
-    // 2️⃣ تحميل متغيرات البيئة
+    // متغيرات البيئة
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ['.env.local', '.env'],
     }),
 
-    // 3️⃣ إعداد TypeORM
+    // TypeORM
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -50,13 +49,17 @@ import { PaymentsModule } from './payments/payments.module';
       },
     }),
 
-    // 4️⃣ الموديولات
+    // ✅ Scheduler لاستخدام polling كل 5s لاحقًا
+    ScheduleModule.forRoot(),
+
+    // الموديولات
     UserModule,
     AuthModule,
     AdminModule,
     ProductsModule,
     CurrenciesModule,
     PaymentsModule,
+    IntegrationsModule,
   ],
 })
 export class AppModule {}
