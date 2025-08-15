@@ -533,7 +533,7 @@ export class ProductsService {
     return created.view;
   }
 
-  // --------------------------
+  // داخل class ProductsService
   async getAllOrders(status?: OrderStatus) {
     const currencies = await this.currenciesRepo.find();
     const getRate = (code: string) => {
@@ -548,6 +548,19 @@ export class ProductsService {
       const r = getRate(c);
       if (!r || !Number.isFinite(r) || r <= 0) return amount;
       return amount * (TRY_RATE / r);
+    };
+
+    // ✅ helper محلي لالتقاط أول رابط صورة صالح دون اصطدام مع أنواع الـ Entity
+    const pickImage = (obj: any): string | null => {
+      if (!obj) return null;
+      return (
+        obj.imageUrl ??
+        obj.image ??
+        obj.logoUrl ??
+        obj.iconUrl ??
+        obj.icon ??
+        null
+      );
     };
 
     const integrations = await this.integrations.list();
@@ -644,7 +657,7 @@ export class ProductsService {
         profitTRY = sellTRY - costTRY;
 
         sellTRY = Number(sellTRY.toFixed(2));
-        costTRY = Number(costTRY.toFixed(2));
+        costTRY  = Number(costTRY.toFixed(2));
         profitTRY = Number(profitTRY.toFixed(2));
       }
 
@@ -658,7 +671,7 @@ export class ProductsService {
         orderNo: (order as any).orderNo ?? null,
         username: (order.user as any)?.username ?? null,
         status: order.status,
-        externalStatus: order.externalStatus,
+        externalStatus: (order as any).externalStatus,
         externalOrderId: order.externalOrderId ?? null,
         providerId: order.providerId ?? null,
 
@@ -687,14 +700,24 @@ export class ProductsService {
         approvedLocalDate: frozen?.approvedLocalDate ?? null,
 
         sentAt: order.sentAt ? order.sentAt.toISOString() : null,
-        lastSyncAt: order.lastSyncAt ? order.lastSyncAt.toISOString() : null,
+        lastSyncAt: (order as any).lastSyncAt ? (order as any).lastSyncAt.toISOString() : null,
         completedAt: order.completedAt ? order.completedAt.toISOString() : null,
 
         createdAt: order.createdAt.toISOString(),
         userEmail: order.user?.email || 'غير معروف',
         userIdentifier: order.userIdentifier ?? null,
-        product: { id: order.product.id, name: order.product.name },
-        package: { id: order.package.id, name: order.package.name },
+
+        // ✅ نعيد imageUrl موحّد للواجهة
+        product: {
+          id: order.product?.id,
+          name: order.product?.name,
+          imageUrl: pickImage((order as any).product),
+        },
+        package: {
+          id: order.package?.id,
+          name: order.package?.name,
+          imageUrl: pickImage((order as any).package),
+        },
       };
     });
   }
@@ -715,6 +738,18 @@ export class ProductsService {
       relations: ['product', 'package'],
       order: { createdAt: 'DESC' as any },
     });
+    // التقط أول رابط صورة متاح تحت عدد من الأسماء الشائعة
+    const pickImage = (obj: any): string | null => {
+      if (!obj) return null;
+      return (
+        obj.imageUrl ??
+        obj.image ??
+        obj.logoUrl ??
+        obj.iconUrl ??
+        obj.icon ??
+        null
+      );
+    };
 
     return orders.map((order) => {
       const priceUSD = Number(order.price) || 0;
@@ -733,8 +768,17 @@ export class ProductsService {
         },
         createdAt: order.createdAt,
         userIdentifier: order.userIdentifier ?? null,
-        product: { id: order.product.id, name: order.product.name },
-        package: { id: order.package.id, name: order.package.name },
+        product: {
+          id: order.product.id,
+          name: order.product.name,
+          imageUrl: (order.product as any)?.imageUrl ?? null,
+        },
+        package: {
+          id: order.package.id,
+          name: order.package.name,
+          imageUrl: (order.package as any)?.imageUrl ?? null,
+          productId: order.product.id, // اختياري، مفيد لو احتجناه لاحقًا
+        },
       };
     });
   }
