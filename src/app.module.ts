@@ -15,35 +15,37 @@ import { PaymentsModule } from './payments/payments.module';
 
 @Module({
   imports: [
-    // تقديم الملفات الثابتة (لرفع الملفات محليًا عند التطوير)
+    // تقديم الملفات الثابتة (تفيد محليًا لو استخدمت تخزين ملفات على القرص)
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', 'uploads'),
       serveRoot: '/uploads',
     }),
 
-    // متغيرات البيئة
+    // متغيرات البيئة: يقرأ .env.local أولًا ثم .env
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath:
-        process.env.NODE_ENV === 'development' ? '.env.local' : '.env',
+      envFilePath: ['.env.local', '.env'],
     }),
 
-    // إعداد TypeORM مع دعم Render و SSL
+    // إعداد TypeORM مع دعم SSL في الإنتاج (مثل Render)
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
         const databaseUrl = config.get<string>('DATABASE_URL');
-        if (!databaseUrl) throw new Error('DATABASE_URL is not defined');
+        if (!databaseUrl) {
+          throw new Error('DATABASE_URL is not defined');
+        }
 
         const nodeEnv = config.get<string>('NODE_ENV') || 'production';
         const isProd = nodeEnv === 'production';
 
         return {
-          type: 'postgres',
+          type: 'postgres' as const,
           url: databaseUrl,
           autoLoadEntities: true,
-          synchronize: true, // عطّلها في الإنتاج إذا تستخدم migrations
+          synchronize: true, // عطّلها في الإنتاج إذا تعتمد على migrations
+          // في Render وبعض مزودي Postgres يلزم SSL:
           ssl: isProd ? { rejectUnauthorized: false } : false,
           extra: isProd ? { ssl: { rejectUnauthorized: false } } : undefined,
           logging: ['error'],
@@ -51,10 +53,10 @@ import { PaymentsModule } from './payments/payments.module';
       },
     }),
 
-    // ✅ Scheduler لاستخدام polling لاحقًا
+    // للمهام المجدولة إن احتجتها
     ScheduleModule.forRoot(),
 
-    // الموديولات
+    // بقية الموديولات
     UserModule,
     AuthModule,
     AdminModule,
