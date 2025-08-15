@@ -34,12 +34,17 @@ export class NotificationsService {
   }
 
   private fmt(n: number) {
+    // 12,345 -> 12.345
     return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 })
       .format(n)
       .replace(/,/g, '.');
   }
 
-  // ✅ نسخة مُحدّثة تدعم readAt/link/channel/priority
+  private arStatus(s: 'approved' | 'rejected' | 'pending') {
+    return s === 'approved' ? 'قبول' : s === 'rejected' ? 'رفض' : 'قيد المراجعة';
+  }
+
+  // ========== مُنشئ تنبيه عام ==========
   private async createTyped(
     userId: string,
     type: NotificationType,
@@ -97,24 +102,33 @@ export class NotificationsService {
       .execute();
   }
 
-  // ========== سيناريوهاتنا ==========
-  /** خصم محفظة عند إنشاء طلب */
-  async walletDebit(userId: string, amountUserCurrency: number, orderId?: string) {
+  // ========== سيناريوهات منفصلة ==========
+  /** خصم محفظة عام */
+  async walletDebit(
+    userId: string,
+    amountUserCurrency: number,
+    orderId?: string,
+    ctx?: { packageName?: string; userIdentifier?: string }
+  ) {
     const user = await this.mustGetUser(userId);
     const code = user.currency?.code ?? 'USD';
     const sym = this.symbolFor(code);
     const amountText = `${this.fmt(amountUserCurrency)} ${sym}`;
+
+    const pkg = ctx?.packageName ? ` للباقة «${ctx.packageName}»` : '';
+    const uid = ctx?.userIdentifier ? ` (معرّف اللاعب ${ctx.userIdentifier})` : '';
+
     return this.createTyped(
       userId,
       'wallet_debit',
-      'تم خصم رصيد من محفظتك',
-      `تم خصم ${amountText} لإتمام عملية شراء${orderId ? ` (طلب #${orderId})` : ''}.`,
-      { amount: amountUserCurrency, currencyCode: code, orderId },
+      'خصم من المحفظة',
+      `تم خصم ${amountText} لإتمام عملية شراء${pkg}${uid}.`,
+      { amount: amountUserCurrency, currencyCode: code, orderId, ...ctx },
       { channel: 'in_app', priority: 'normal', link: orderId ? `/orders/${orderId}` : null }
     );
   }
 
-  /** شحن محفظة */
+  /** شحن محفظة عام */
   async walletTopup(userId: string, amountUserCurrency: number, reason?: string) {
     const user = await this.mustGetUser(userId);
     const code = user.currency?.code ?? 'USD';
@@ -123,50 +137,183 @@ export class NotificationsService {
     return this.createTyped(
       userId,
       'wallet_topup',
-      'تم شحن محفظتك',
-      `تم إضافة ${amountText} إلى محفظتك${reason ? ` — ${reason}` : ''}.`,
+      'شحن رصيد المحفظة',
+      `تم شحن المحفظة بمبلغ ${amountText} وإضافته إلى رصيدك${reason ? ` — ${reason}` : ''}.`,
       { amount: amountUserCurrency, currencyCode: code, reason },
       { channel: 'in_app', priority: 'normal' }
     );
   }
 
-  /** تبدّل حالة الطلب */
-  async orderStatusChanged(
+  /** إشعار موافقة إيداع (مخصص للإيداع) */
+  async depositApproved(
+    userId: string,
+    amountUserCurrency: number,
+    methodName?: string,
+    meta?: Record<string, any>,
+  ) {
+    const user = await this.mustGetUser(userId);
+    const code = user.currency?.code ?? 'USD';
+    const sym  = this.symbolFor(code);
+    const amountText = `${this.fmt(amountUserCurrency)} ${sym}`;
+    const reason = methodName ? `إيداع عبر ${methodName}` : undefined;
+
+    return this.createTyped(
+      userId,
+      'wallet_topup',
+      'شحن رصيد المحفظة',
+      `تم شحن المحفظة بمبلغ ${amountText} وإضافته إلى رصيدك${reason ? ` — ${reason}` : ''}.`,
+      { amount: amountUserCurrency, currencyCode: code, methodName, ...(meta ?? {}) },
+      { channel: 'in_app', priority: 'normal' }
+    );
+  }
+
+  /** إشعار رفض إيداع (مخصص للإيداع) */
+  async depositRejected(
+    userId: string,
+    originalAmount: number,
+    originalCurrency: string,
+    methodName?: string,
+    meta?: Record<string, any>,
+  ) {
+    const methodTxt = methodName ? ` عبر ${methodName}` : '';
+    const origTxt = `${this.fmt(originalAmount)} ${originalCurrency.toUpperCase()}`;
+    return this.createTyped(
+      userId,
+      'announcement',
+      'تم رفض طلب الإيداع',
+      `تم رفض طلب الإيداع بمبلغ ${origTxt}${methodTxt}.`,
+      { originalAmount, originalCurrency: originalCurrency.toUpperCase(), methodName, ...(meta ?? {}) },
+      { channel: 'in_app', priority: 'normal' }
+    );
+  }
+
+  // ========== تنبيه مدمج (غير إلزامي لكن مفيد) ==========
+  async orderOutcome(
     userId: string,
     orderId: string,
-    fromStatus: 'approved' | 'rejected' | 'pending',
-    toStatus: 'approved' | 'rejected' | 'pending',
-    deltaAmountUserCurrency?: number,
+    outcome: 'approved' | 'rejected',
+    opts?: {
+      packageName?: string;
+      userIdentifier?: string;
+      amountUserCurrency?: number; // موجب = استرجاع، سالب = خصم
+      mentionRefund?: boolean;     // افتراضي: false (للرفض فقط)
+    },
   ) {
     const user = await this.mustGetUser(userId);
     const code = user.currency?.code ?? 'USD';
     const sym = this.symbolFor(code);
+    const pkg = opts?.packageName ? `«${opts.packageName}»` : 'المحددة';
+    const uid = opts?.userIdentifier ? ` ومعرّف اللاعب ${opts.userIdentifier}` : '';
+    const amt = opts?.amountUserCurrency ?? 0;
+    const absAmtText = amt ? ` ${this.fmt(Math.abs(amt))} ${sym}` : '';
 
-    let msgCore = `تغيّرت حالة طلبك (رقم ${orderId}) من ${fromStatus} إلى ${toStatus}.`;
-    if (deltaAmountUserCurrency && deltaAmountUserCurrency !== 0) {
-      const amountText = `${this.fmt(Math.abs(deltaAmountUserCurrency))} ${sym}`;
-      msgCore += deltaAmountUserCurrency > 0
-        ? ` تمّت إعادة ${amountText} إلى محفظتك.`
-        : ` تم خصم ${amountText} من محفظتك.`;
+    let title = '';
+    let message = '';
+
+    if (outcome === 'approved') {
+      title = 'تم القبول ✅';
+      message = `تم شحن طلبك للباقة ${pkg}${uid} بنجاح.`;
+      if (amt < 0) {
+        message += ` وخصم${absAmtText} من رصيدك.`;
+      }
+    } else {
+      title = 'تم الرفض ❌';
+      message = `تم رفض طلبك للباقة ${pkg}${uid}.`;
+      if ((opts?.mentionRefund ?? false) && amt > 0) {
+        message += ` وتمّت إعادة${absAmtText} إلى رصيدك.`;
+      }
     }
 
     return this.createTyped(
       userId,
       'order_status_changed',
-      'تغيّر حالة الطلب',
-      msgCore,
+      title,
+      message,
       {
         orderId,
-        fromStatus,
-        toStatus,
-        deltaAmount: deltaAmountUserCurrency ?? 0,
+        fromStatus: outcome === 'approved' ? 'pending' : 'pending',
+        toStatus: outcome,
+        deltaAmount: amt,
         currencyCode: code,
+        packageName: opts?.packageName,
+        userIdentifier: opts?.userIdentifier,
       },
       { channel: 'in_app', priority: 'normal', link: `/orders/${orderId}` }
     );
   }
 
-  /** إعلان عام: نولّد Notification لكل المستخدمين */
+  // ========== توافق خلفي: تغيير حالة الطلب ==========
+  async orderStatusChanged(
+    userId: string,
+    orderId: string,
+    fromStatus: 'approved' | 'rejected' | 'pending',
+    toStatus: 'approved' | 'rejected' | 'pending',
+    deltaOrOpts?: number | {
+      deltaAmountUserCurrency?: number;
+      packageName?: string;
+      userIdentifier?: string;
+    },
+  ) {
+    const user = await this.mustGetUser(userId);
+    const code = user.currency?.code ?? 'USD';
+    const sym = this.symbolFor(code);
+
+    const opts = typeof deltaOrOpts === 'number'
+      ? { deltaAmountUserCurrency: deltaOrOpts }
+      : (deltaOrOpts ?? {});
+
+    const pkgName = opts.packageName ? `«${opts.packageName}»` : 'المحددة';
+    const uidText = opts.userIdentifier ? `معرّف اللاعب ${opts.userIdentifier}` : '';
+    const label = uidText ? `${pkgName}، ${uidText}` : pkgName;
+
+    const amount = opts.deltaAmountUserCurrency ?? 0;
+    const hasAmount = typeof opts.deltaAmountUserCurrency === 'number';
+    const amountText = hasAmount ? ` (${this.fmt(Math.abs(amount))} ${sym})` : '';
+
+    let title = 'تغيير في حالة الطلب';
+    let message: string;
+
+    if (toStatus === 'approved' && fromStatus !== 'approved') {
+      title = 'تم القبول ✅';
+      message = `تم شحن طلبك للباقة ${pkgName}${opts.userIdentifier ? ` ومعرّف اللاعب ${opts.userIdentifier}` : ''} بنجاح.`;
+      if (hasAmount && amount < 0) message += ` تم خصم المبلغ من رصيدك${amountText}.`;
+    } else if (toStatus === 'rejected' && fromStatus !== 'rejected') {
+      title = 'تم الرفض ❌';
+      message = `تم رفض طلبك للباقة ${pkgName}${opts.userIdentifier ? ` ومعرّف اللاعب ${opts.userIdentifier}` : ''}.`;
+    } else if (fromStatus === 'approved' && toStatus === 'rejected') {
+      message = `تم تغيير الطلب (${label}) من حالة قبول إلى رفض.`;
+    } else if (fromStatus === 'rejected' && toStatus === 'approved') {
+      message = `تم تغيير الطلب (${label}) من حالة رفض إلى قبول.`;
+    } else {
+      message = `تم تغيير حالة الطلب (${label}) من ${this.arStatus(fromStatus)} إلى ${this.arStatus(toStatus)}.`;
+      if (hasAmount) {
+        message += amount > 0
+          ? ` تمّت إعادة مبلغ إلى رصيدك${amountText}.`
+          : amount < 0
+          ? ` تم خصم مبلغ من رصيدك${amountText}.`
+          : '';
+      }
+    }
+
+    return this.createTyped(
+      userId,
+      'order_status_changed',
+      title,
+      message,
+      {
+        orderId,
+        fromStatus,
+        toStatus,
+        deltaAmount: amount,
+        currencyCode: code,
+        packageName: opts.packageName,
+        userIdentifier: opts.userIdentifier,
+      },
+      { channel: 'in_app', priority: 'normal', link: `/orders/${orderId}` }
+    );
+  }
+
+  // ========== إعلان عام ==========
   async announceForAll(
     title: string,
     message: string,

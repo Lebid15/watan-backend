@@ -15,7 +15,6 @@ import { PackageMapping } from '../integrations/package-mapping.entity';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { AccountingPeriodsService } from '../accounting/accounting-periods.service';
 
-
 export type OrderStatus = 'pending' | 'approved' | 'rejected';
 
 @Injectable()
@@ -306,7 +305,7 @@ export class ProductsService {
     const match = (pkg.prices ?? []).find(p => p.priceGroup?.id === user.priceGroup!.id);
     return match ? Number(match.price) : base;
   }
-  
+
   /** تحويل mappedStatus القادم من الدرايفر إلى حالة خارجية داخلية موحّدة */
   private mapMappedToExternalStatus(mapped?: string) {
     const s = String(mapped || '').toLowerCase();
@@ -319,17 +318,13 @@ export class ProductsService {
 
   /** محاولة إرسال الطلب تلقائيًا حسب إعدادات التوجيه (مع تجربة fallback مرة واحدة إن لزم) */
   private async tryAutoDispatch(orderId: string) {
-    // 1) حمّل الطلب + الباقة
     const order = await this.ordersRepo.findOne({
       where: { id: orderId },
       relations: ['package', 'product', 'user'],
     });
     if (!order) return;
-
-    // لا تحاول لو الطلب أرسل أصلاً أو انتهى
     if (order.providerId || order.externalOrderId || order.status !== 'pending') return;
 
-    // 2) إحضار إعدادات التوجيه للباقة
     const routing = await this.routingRepo.findOne({
       where: { package: { id: order.package.id } as any },
       relations: ['package'],
@@ -337,7 +332,6 @@ export class ProductsService {
     if (!routing || routing.mode !== 'auto' || !routing.primaryProviderId) return;
 
     const tryOnce = async (providerId: string) => {
-      // تحقق من وجود mapping للباقة مع هذا المزود
       const mapping = await this.mappingRepo.findOne({
         where: { our_package_id: order.package.id, provider_api_id: providerId },
       });
@@ -345,7 +339,6 @@ export class ProductsService {
         throw new Error('لا يوجد ربط لهذه الباقة عند هذا المزوّد');
       }
 
-      // تجهيز الحمولة للدرايفر
       const payload = {
         productId: String(mapping.provider_package_id),
         qty: Number(order.quantity || 1),
@@ -359,14 +352,12 @@ export class ProductsService {
       const placed = await this.integrations.placeOrder(providerId, payload);
       const cfg = await this.integrations.get(providerId);
 
-      // استنتاج العملة من ردّ المزوّد
       let priceCurrency: string | undefined =
         (placed as any)?.costCurrency ||
         (placed as any)?.priceCurrency ||
         (placed as any)?.raw?.currency ||
         (placed as any)?.raw?.Currency;
 
-      // حزام أمان: znet دائماً TRY
       if (cfg.provider === 'znet') priceCurrency = 'TRY';
 
       if (typeof priceCurrency === 'string') {
@@ -375,13 +366,11 @@ export class ProductsService {
         priceCurrency = 'USD';
       }
 
-      // لو أعاد السعر/التكلفة من المزود خزّنها (إن توفرت) — بدون فرض USD أبداً
       if (typeof (placed as any)?.price === 'number' && Number.isFinite((placed as any).price)) {
-        order.costAmount = Math.abs(Number((placed as any).price)) as any; // قيمة موجبة
+        order.costAmount = Math.abs(Number((placed as any).price)) as any;
         order.costCurrency = (priceCurrency as any) || 'USD';
       }
 
-      // تحديث الطلب
       order.providerId = providerId;
       order.externalOrderId = (placed as any)?.externalOrderId ?? null;
       order.externalStatus = this.mapMappedToExternalStatus((placed as any)?.mappedStatus);
@@ -397,7 +386,6 @@ export class ProductsService {
 
       await this.ordersRepo.save(order);
 
-      // سجل محاولة الإرسال
       await this.logsRepo.save(
         this.logsRepo.create({
           order,
@@ -408,7 +396,6 @@ export class ProductsService {
         }),
       );
 
-      // لو انتهت "done" وافق تلقائيًا، ولو "failed" ارفض
       if (order.externalStatus === 'done') {
         await this.updateOrderStatus(order.id, 'approved');
       } else if (order.externalStatus === 'failed') {
@@ -416,7 +403,6 @@ export class ProductsService {
       }
     };
 
-    // 3) جرّب الـ primary
     try {
       await tryOnce(routing.primaryProviderId!);
       return;
@@ -431,7 +417,6 @@ export class ProductsService {
       );
     }
 
-    // 4) إن فشل الـ primary و لدينا fallback — جرّبه مرة واحدة
     if (routing.fallbackProviderId) {
       try {
         await tryOnce(routing.fallbackProviderId);
@@ -447,8 +432,6 @@ export class ProductsService {
         );
       }
     }
-
-    // إذا فشل الإثنان يبقى الطلب pending ويظهر في لوحة الأدمن كـ Manual
   }
 
   // ================ الطلبات =============
@@ -466,7 +449,6 @@ export class ProductsService {
       throw new BadRequestException('Quantity must be a positive number');
     }
 
-    // ننفّذ داخل Transaction لتجنّب حالات السباق على الرصيد
     const created = await this.ordersRepo.manager.transaction(async (trx) => {
       const productsRepo = trx.getRepository(Product);
       const packagesRepo = trx.getRepository(ProductPackage);
@@ -484,36 +466,30 @@ export class ProductsService {
         throw new ConflictException('الحساب غير فعّال');
       }
 
-      // ✅ سعر الوحدة المناسب للمستخدم (بالدولار كأساس)
       const unitPriceUSD = await this.getEffectivePriceUSD(packageId, userId);
       const totalUSD = Number(unitPriceUSD) * Number(quantity);
 
-      // ✅ تحويل السعر إلى عملة المستخدم (المحفظة بعملة المستخدم)
       const rate = user.currency ? Number(user.currency.rate) : 1;
       const code = user.currency ? user.currency.code : 'USD';
       const totalUser = totalUSD * rate;
 
-      // ✅ تحقق الرصيد مع حد السالب
       const balance = Number(user.balance) || 0;
       const overdraft = Number(user.overdraftLimit) || 0;
       if (totalUser > balance + overdraft) {
         throw new ConflictException('الرصيد غير كافٍ (تجاوز حد السالب المسموح)');
       }
 
-      // ✅ خصم بعملة المستخدم
       user.balance = balance - totalUser;
       await usersRepo.save(user);
 
-      // ✅ إحضار الباقة
       const pkg = await packagesRepo.findOne({ where: { id: packageId } });
       if (!pkg) throw new NotFoundException('الباقة غير موجودة');
 
-      // ✅ أنشئ الطلب (مبدئيًا pending & manual)
       const order = ordersRepo.create({
         product,
         package: pkg,
         quantity,
-        price: totalUSD, // مخزّن بالدولار
+        price: totalUSD, // بالدولار
         status: 'pending',
         user,
         userIdentifier: userIdentifier ?? null,
@@ -521,10 +497,12 @@ export class ProductsService {
 
       const saved = await ordersRepo.save(order);
 
-      // ✅ إرسال تنبيه خصم محفظة
-      await this.notifications.walletDebit(user.id, totalUser, saved.id);
+      // ❌ لا نُرسل إشعار خصم هنا (سنرسل إشعارًا موحّدًا عند القبول/الرفض)
+      // await this.notifications.walletDebit(user.id, totalUser, saved.id, {
+      //   packageName: pkg.name,
+      //   userIdentifier: userIdentifier ?? undefined,
+      // });
 
-      // ✅ نعيد البيانات المعروضة للفرونت
       return {
         entityId: saved.id,
         view: {
@@ -546,42 +524,36 @@ export class ProductsService {
       };
     });
 
-    // ✅ بعد نجاح إنشاء الطلب ومعالجة الرصيد — جرّب التوجيه التلقائي
     try {
       await this.tryAutoDispatch(created.entityId);
     } catch (e) {
-      // لا نرمي خطأ على المستخدم؛ يظل الطلب pending ويظهر للأدمن
+      // يبقى الطلب pending
     }
 
     return created.view;
   }
 
-
   // --------------------------
   async getAllOrders(status?: OrderStatus) {
-    // 0) جهّز أسعار الصرف (للاحتساب الحي للحالات غير المجمّدة)
     const currencies = await this.currenciesRepo.find();
     const getRate = (code: string) => {
       const row = currencies.find((c) => c.code.toUpperCase() === code.toUpperCase());
-      return row ? Number(row.rate) : undefined; // rate = كم من هذه العملة لكل 1 USD
+      return row ? Number(row.rate) : undefined;
     };
     const TRY_RATE = getRate('TRY') ?? 1;
 
     const toTRY = (amount: number, code?: string) => {
       const c = (code || 'TRY').toUpperCase();
-      if (c === 'TRY') return amount;                // لا تحويل
+      if (c === 'TRY') return amount;
       const r = getRate(c);
-      if (!r || !Number.isFinite(r) || r <= 0) return amount; // فشل العثور على السعر → اعتبرها TRY
-      // amount(c) -> USD -> TRY  === amount * (TRY_RATE / r)
+      if (!r || !Number.isFinite(r) || r <= 0) return amount;
       return amount * (TRY_RATE / r);
     };
 
-    // 1) خريطة المزوّدين لعرض شارة الـ API
     const integrations = await this.integrations.list();
     const providersMap = new Map<string, string>();
     for (const it of integrations as any[]) providersMap.set(it.id, it.provider);
 
-    // 2) اجلب الطلبات
     const query = this.ordersRepo
       .createQueryBuilder('order')
       .leftJoinAndSelect('order.user', 'user')
@@ -594,7 +566,6 @@ export class ProductsService {
 
     const orders = await query.getMany();
 
-    // 3) اجلب القيم المجمّدة دفعة واحدة (حتى لو الـ Entity لا يحتوي الأعمدة)
     const approvedIds = orders.filter(o => o.status === 'approved').map(o => o.id);
     let frozenMap = new Map<string, {
       fxLocked: boolean;
@@ -630,46 +601,36 @@ export class ProductsService {
       );
     }
 
-    // 4) إخراج منسّق
     return orders.map((order) => {
-      // السعر المخزّن بالدولار (إجمالي الطلب)
       const priceUSD = Number(order.price) || 0;
       const unitPriceUSD = order.quantity ? priceUSD / Number(order.quantity) : priceUSD;
 
-      // هل الطلب خارجي؟
       const providerType = order.providerId ? providersMap.get(order.providerId) : undefined;
       const isExternal = !!(order.providerId && order.externalOrderId);
 
-      // ---- وضع مجمّد؟ (للطلبات approved فقط)
       const frozen = frozenMap.get(order.id);
       const isFrozen = !!(frozen && frozen.fxLocked && order.status === 'approved');
 
-      // القيم بالليرة التركية
       let sellTRY: number;
       let costTRY: number;
       let profitTRY: number;
 
       if (isFrozen) {
-        // استخدم القيم المجمّدة كما هي
         sellTRY = Number((frozen!.sellTryAtApproval ?? 0).toFixed(2));
         costTRY = Number((frozen!.costTryAtApproval ?? 0).toFixed(2));
-        // لو profitTryAtApproval مفقودة نحسبها فرقًا بين المجمد
         const profitFrozen =
           frozen!.profitTryAtApproval != null
             ? Number(frozen!.profitTryAtApproval)
             : (sellTRY - costTRY);
         profitTRY = Number(profitFrozen.toFixed(2));
       } else {
-        // حساب حي (للطلبات غير المجمّدة)
-        // تكلفة TRY:
         if (isExternal) {
           const amt = Math.abs(Number(order.costAmount ?? 0));
           let cur = String(order.costCurrency || '').toUpperCase().trim();
-          if (providerType === 'znet') cur = 'TRY'; // حزام أمان
+          if (providerType === 'znet') cur = 'TRY';
           if (!cur) cur = 'USD';
           costTRY = toTRY(amt, cur);
         } else {
-          // Manual: التكلفة = basePriceUSD × الكمية × TRY_RATE
           const baseUSD = Number(
             (order as any).package?.basePrice ??
             (order as any).package?.capital ??
@@ -679,17 +640,14 @@ export class ProductsService {
           costTRY = (baseUSD * qty) * TRY_RATE;
         }
 
-        // بيع TRY من priceUSD
         sellTRY = priceUSD * TRY_RATE;
         profitTRY = sellTRY - costTRY;
 
-        // تقريب
         sellTRY = Number(sellTRY.toFixed(2));
         costTRY = Number(costTRY.toFixed(2));
         profitTRY = Number(profitTRY.toFixed(2));
       }
 
-      // الحقول القديمة: عرض بعملة المستخدم (للتوافق مع الواجهات)
       const userRate = order.user?.currency ? Number(order.user.currency.rate) : 1;
       const userCode = order.user?.currency ? order.user.currency.code : 'USD';
       const totalUser = priceUSD * userRate;
@@ -706,7 +664,6 @@ export class ProductsService {
 
         quantity: order.quantity,
 
-        // عرض بعملة المستخدم (توافق قديم)
         price: totalUser,
         currencyCode: userCode,
         unitPrice: unitUser,
@@ -718,21 +675,17 @@ export class ProductsService {
           totalPrice: totalUser,
         },
 
-        // عرض بالليرة التركية (المعياري)
         currencyTRY: 'TRY',
         sellTRY,
         costTRY,
         profitTRY,
 
-        // معلومات المصدر
         costAmount: order.costAmount ?? null,
         costCurrency: order.costCurrency ?? null,
 
-        // شارة التجميد للواجهة
         fxLocked: isFrozen,
         approvedLocalDate: frozen?.approvedLocalDate ?? null,
 
-        // أوقات
         sentAt: order.sentAt ? order.sentAt.toISOString() : null,
         lastSyncAt: order.lastSyncAt ? order.lastSyncAt.toISOString() : null,
         completedAt: order.completedAt ? order.completedAt.toISOString() : null,
@@ -745,8 +698,8 @@ export class ProductsService {
       };
     });
   }
+
   // ------------------
-  // طلبات المستخدم (لعرضها في واجهة المستخدم)
   async getUserOrders(userId: string) {
     const user = await this.usersRepo.findOne({
       where: { id: userId },
@@ -764,7 +717,7 @@ export class ProductsService {
     });
 
     return orders.map((order) => {
-      const priceUSD = Number(order.price) || 0; // المخزن بالدولار (إجمالي)
+      const priceUSD = Number(order.price) || 0;
       const unitPriceUSD = order.quantity ? priceUSD / Number(order.quantity) : priceUSD;
 
       return {
@@ -786,7 +739,7 @@ export class ProductsService {
     });
   }
 
-  // =============== ✅ جديد: دالة التجميد عند الاعتماد (Idempotent) ===============
+  // =============== ✅ تجميد FX عند الاعتماد (Idempotent) ===============
   private async freezeFxOnApprovalIfNeeded(orderId: string): Promise<void> {
     const order = await this.ordersRepo.findOne({
       where: { id: orderId },
@@ -797,15 +750,12 @@ export class ProductsService {
     const locked = (order as any).fxLocked === true;
     if (locked) return;
 
-    // TRY per 1 USD
     const tryRow = await this.currenciesRepo.findOne({ where: { code: 'TRY', isActive: true } });
     const fxUsdTry = tryRow?.rate ? Number(tryRow.rate) : 1;
 
-    // البيع بالليرة (price بالدولار)
     const priceUSD = Number(order.price || 0);
     const sellTryAtApproval = Number((priceUSD * fxUsdTry).toFixed(2));
 
-    // التكلفة بالليرة
     let costTryAtApproval = 0;
     const costAmount = order.costAmount != null ? Math.abs(Number(order.costAmount)) : null;
     let costCur = (order.costCurrency as any) ? String(order.costCurrency).toUpperCase().trim() : '';
@@ -836,8 +786,8 @@ export class ProductsService {
     const y = parts.find(p => p.type === 'year')?.value ?? '1970';
     const m = parts.find(p => p.type === 'month')?.value ?? '01';
     const d = parts.find(p => p.type === 'day')?.value ?? '01';
-    const approvedLocalDate = `${y}-${m}-${d}`; // YYYY-MM-DD
-    const approvedLocalMonth = `${y}-${m}`;     // YYYY-MM
+    const approvedLocalDate = `${y}-${m}-${d}`;
+    const approvedLocalMonth = `${y}-${m}`;
 
     await this.ordersRepo.update(
       { id: order.id },
@@ -848,7 +798,6 @@ export class ProductsService {
         ...( { profitTryAtApproval } as any ),
         ...( { profitUsdAtApproval } as any ),
         ...( { fxCapturedAt: new Date() } as any ),
-        ...( { fxSource: 'local_currencies_table' } as any ),
         ...( { approvedAt } as any ),
         ...( { approvedLocalDate } as any ),
         ...( { approvedLocalMonth } as any ),
@@ -859,13 +808,13 @@ export class ProductsService {
 
   // ------------------------
   async updateOrderStatus(orderId: string, status: OrderStatus) {
+    // 👈 نحتاج الباقة هنا لكتابة اسمها في الإشعار
     const order = await this.ordersRepo.findOne({
       where: { id: orderId },
-      relations: ['user', 'user.currency'],
+      relations: ['user', 'user.currency', 'package'],
     });
     if (!order) return null;
 
-    // 🔒 منع تعديل طلب مُعتمد ضمن شهر مُقفَل
     const row = await this.ordersRepo.query(
       `SELECT "approvedLocalDate" FROM "product_orders" WHERE id = $1 LIMIT 1`,
       [orderId],
@@ -880,45 +829,22 @@ export class ProductsService {
     const prevStatus = order.status;
     const user = order.user;
 
-    // مبلغ الطلب بعملة المستخدم (للرصيد)
     const rate = user?.currency ? Number(user.currency.rate) : 1;
     const priceUSD = Number(order.price) || 0;
     const amountInUserCurrency = priceUSD * rate;
 
     let deltaUser = 0;
 
-    // استرجاع عند الرفض (فقط إذا لم يكن مرفوضًا سابقًا)
+    // استرجاع عند الرفض (من غير تكرار إشعارات منفصلة)
     if (status === 'rejected' && prevStatus !== 'rejected') {
       user.balance = Number(user.balance || 0) + amountInUserCurrency;
       await this.usersRepo.save(user);
       deltaUser = amountInUserCurrency;
-      await this.notifications.walletTopup(
-        user.id,
-        amountInUserCurrency,
-        `استرجاع مبلغ لرفض الطلب #${orderId}`
-      );
 
-      // ✅ إذا كان الطلب كان Approved قبل قليل: فكّ التجميد كي يُعاد تجميده عند موافقة لاحقة
-      if (prevStatus === 'approved') {
-        await this.ordersRepo.update(
-          { id: order.id },
-          {
-            ...( { fxLocked: false } as any ),
-            ...( { fxUsdTryAtApproval: null } as any ),
-            ...( { sellTryAtApproval: null } as any ),
-            ...( { costTryAtApproval: null } as any ),
-            ...( { profitTryAtApproval: null } as any ),
-            ...( { profitUsdAtApproval: null } as any ),
-            ...( { fxCapturedAt: null } as any ),
-            ...( { approvedAt: null } as any ),
-            ...( { approvedLocalDate: null } as any ),
-            ...( { approvedLocalMonth: null } as any ),
-          } as any
-        );
-      }
+      // ❌ لا نرسل walletTopup إشعارًا منفصلًا
     }
 
-    // إعادة الخصم عند الموافقة بعد رفض سابق
+    // إعادة الخصم عند الموافقة بعد رفض سابق (من غير إشعار منفصل)
     if (status === 'approved' && prevStatus === 'rejected') {
       const balance = Number(user.balance) || 0;
       const overdraft = Number(user.overdraftLimit) || 0;
@@ -930,35 +856,52 @@ export class ProductsService {
       user.balance = balance - amountInUserCurrency;
       await this.usersRepo.save(user);
       deltaUser = -amountInUserCurrency;
-      await this.notifications.walletDebit(
-        user.id,
-        amountInUserCurrency,
-        `إعادة خصم لموافقة الطلب #${orderId}`
-      );
+
+      // ❌ لا نرسل walletDebit إشعارًا منفصلًا
     }
 
-    // تحديث الحالة
     order.status = status;
     const saved = await this.ordersRepo.save(order);
 
-    // عند الموافقة: نفّذ التجميد (Idempotent)
     if (status === 'approved') {
       try { await this.freezeFxOnApprovalIfNeeded(saved.id); } catch {}
     }
+    if (prevStatus === 'approved' && status !== 'approved') {
+      // فك التجميد عند الرجوع عن الموافقة
+      await this.ordersRepo.update(
+        { id: order.id },
+        {
+          ...( { fxLocked: false } as any ),
+          ...( { fxUsdTryAtApproval: null } as any ),
+          ...( { sellTryAtApproval: null } as any ),
+          ...( { costTryAtApproval: null } as any ),
+          ...( { profitTryAtApproval: null } as any ),
+          ...( { profitUsdAtApproval: null } as any ),
+          ...( { fxCapturedAt: null } as any ),
+          ...( { approvedAt: null } as any ),
+          ...( { approvedLocalDate: null } as any ),
+          ...( { approvedLocalMonth: null } as any ),
+        } as any
+      );
+    }
 
-    // إشعار تغيّر الحالة
+    // ✅ إشعار موحّد بصياغة العربيّة الجديدة + إصلاح توقيع الدالة (نمرّر كائن لا رقم)
     await this.notifications.orderStatusChanged(
       user.id,
       saved.id,
       prevStatus as any,
       status as any,
-      deltaUser || 0,
+      {
+        deltaAmountUserCurrency: deltaUser || 0,
+        packageName: order.package?.name,
+        userIdentifier: order.userIdentifier || undefined,
+      },
     );
 
     return saved;
   }
-  // ================== أدوات مساعدة للعرض ==================
 
+  // ================== أدوات مساعدة للعرض ==================
   private async getUserDisplayContext(userId: string) {
     const user = await this.usersRepo.findOne({
       where: { id: userId },

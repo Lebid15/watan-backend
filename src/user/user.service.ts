@@ -1,11 +1,13 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { User } from './user.entity';
 import * as bcrypt from 'bcrypt';
+
+import { User } from './user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { PriceGroup } from '../products/price-group.entity';
 import { Currency } from '../currencies/currency.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Injectable()
 export class UserService {
@@ -18,6 +20,9 @@ export class UserService {
 
     @InjectRepository(Currency)
     private readonly currenciesRepository: Repository<Currency>,
+
+    // ✅ حقن خدمة الإشعارات
+    private readonly notifications: NotificationsService,
   ) {}
 
   async createUser(createUserDto: CreateUserDto): Promise<User> {
@@ -158,7 +163,7 @@ export class UserService {
     };
   }
 
-  // -------- الميزات الجديدة المطلوبة للوحة المشرف --------
+  // -------- الميزات للوحة المشرف --------
 
   /** تفعيل/تعطيل المستخدم */
   async setActive(userId: string, isActive: boolean) {
@@ -169,14 +174,14 @@ export class UserService {
     return { ok: true };
   }
 
-/** ضبط الرصيد بمبلغ موجب أو سالب مع احترام حد السالب */
+  /** ضبط الرصيد بمبلغ موجب أو سالب مع احترام حد السالب */
   async addFunds(userId: string, amount: number) {
     const delta = Number(amount);
     if (!isFinite(delta) || delta === 0) {
       throw new BadRequestException('amount must be a non-zero number');
     }
 
-    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    const user = await this.usersRepository.findOne({ where: { id: userId }, relations: ['currency'] });
     if (!user) throw new NotFoundException('User not found');
 
     const current = Number(user.balance) || 0;
@@ -190,6 +195,16 @@ export class UserService {
 
     user.balance = newBalance;
     await this.usersRepository.save(user);
+
+    // ✅ إشعار فقط عند الشحن الموجب (زر +)
+    if (delta > 0) {
+      await this.notifications.walletTopup(user.id, delta, 'شحن بواسطة الإدارة');
+    }
+    // (اختياري) لو أردت إشعارًا عند الخصم اليدوي:
+    // else if (delta < 0) {
+    //   await this.notifications.walletDebit(user.id, Math.abs(delta));
+    // }
+
     return { ok: true, balance: Number(user.balance) };
   }
 

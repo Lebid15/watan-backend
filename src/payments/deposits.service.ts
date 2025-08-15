@@ -17,8 +17,8 @@ export class DepositsService {
     @InjectRepository(PaymentMethod) private methodsRepo: Repository<PaymentMethod>,
     @InjectRepository(User) private usersRepo: Repository<User>,
     @InjectRepository(Currency) private currenciesRepo: Repository<Currency>,
-    private readonly dataSource: DataSource, 
-    private readonly notifications: NotificationsService, 
+    private readonly dataSource: DataSource,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private async getRate(code: string): Promise<number> {
@@ -113,27 +113,27 @@ export class DepositsService {
         user.balance = (current + add) as any;
         await manager.save(user);
 
-        // 🔔 إشعار: تم شحن محفظتك
-        const reason = dep.method?.name ? `إيداع عبر ${dep.method.name}` : undefined;
-        await this.notifications.walletTopup(dep.user_id, add, reason);
+        // 🔔 إشعار موافقة إيداع واضح
+        await this.notifications.depositApproved(
+          dep.user_id,
+          add,
+          dep.method?.name ?? undefined,
+          { depositId: dep.id }
+        );
       }
 
-      // عند الرفض: إشعار رفض فقط
+      // عند الرفض: إشعار رفض واضح
       if (oldStatus !== DepositStatus.REJECTED && newStatus === DepositStatus.REJECTED) {
-        const origTxt = `${dep.originalAmount} ${dep.originalCurrency}`;
-        const methodTxt = dep.method?.name ? ` عبر ${dep.method.name}` : '';
-        await this.notifications['createTyped'](
+        await this.notifications.depositRejected(
           dep.user_id,
-          'announcement',
-          'تم رفض طلب الإيداع',
-          `تم رفض طلب الإيداع بمبلغ ${origTxt}${methodTxt}.`,
-          { depositId: dep.id, methodName: dep.method?.name ?? null },
-          { channel: 'in_app', priority: 'normal' },
+          Number(dep.originalAmount ?? 0),
+          dep.originalCurrency,
+          dep.method?.name ?? undefined,
+          { depositId: dep.id }
         );
       }
 
       return dep;
     });
   }
-
 }
