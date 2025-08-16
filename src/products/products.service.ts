@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository, In, Brackets  } from 'typeorm';
 import { Product } from './product.entity';
 import { ProductPackage } from './product-package.entity';
 import { PackagePrice } from './package-price.entity';
@@ -14,6 +14,8 @@ import { PackageRouting } from '../integrations/package-routing.entity';
 import { PackageMapping } from '../integrations/package-mapping.entity';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { AccountingPeriodsService } from '../accounting/accounting-periods.service';
+import { decodeCursor, encodeCursor, toEpochMs } from '../utils/pagination';
+import { ListOrdersDto } from './dto/list-orders.dto';
 
 export type OrderStatus = 'pending' | 'approved' | 'rejected';
 
@@ -1031,4 +1033,468 @@ export class ProductsService {
       ...this.mapProductForUser(product, rate, priceGroupId),
     };
   }
-}
+
+  // داخل class ProductsService
+  async listOrdersWithPagination(dto: ListOrdersDto) {
+    const limit = Math.max(1, Math.min(100, dto.limit ?? 25));
+    const cursor = decodeCursor(dto.cursor);
+
+    const qb = this.ordersRepo
+      .createQueryBuilder('o')
+      .leftJoinAndSelect('o.user', 'u')
+      .leftJoinAndSelect('o.package', 'pkg')
+      .leftJoinAndSelect('o.product', 'prod');
+
+    // الحالة
+    if (dto.status) {
+      qb.andWhere('o.status = :status', { status: dto.status });
+    }
+
+    // طريقة التنفيذ: '' | 'manual' | providerId
+    if (dto.method === 'manual') {
+      qb.andWhere('(o.providerId IS NULL OR o.externalOrderId IS NULL)');
+    } else if (dto.method) {
+      qb.andWhere('o.providerId = :pid AND o.externalOrderId IS NOT NULL', {
+        pid: dto.method,
+      });
+    }
+
+    // التاريخ
+    if (dto.from) {
+      qb.andWhere('o.createdAt >= :from', {
+        from: new Date(dto.from + 'T00:00:00Z'),
+      });
+    }
+    if (dto.to) {
+      qb.andWhere('o.createdAt <= :to', {
+        to: new Date(dto.to + 'T23:59:59Z'),
+      });
+    }
+
+    // البحث الرقمي (تطابق تام: orderNo / userIdentifier / externalOrderId)
+    if (dto.q && dto.isQDigitsOnly) {
+      const qd = dto.qDigits;
+      qb.andWhere(new Brackets((b) => {
+        b.where('CAST(o.orderNo AS TEXT) = :qd', { qd })
+          .orWhere('o.userIdentifier = :qd', { qd })
+          .orWhere('o.externalOrderId = :qd', { qd });
+      }));
+    }
+
+    // Keyset cursor
+    if (cursor) {
+      qb.andWhere(new Brackets((b) => {
+        b.where('o.createdAt < :cts', { cts: new Date(cursor.ts) })
+          .orWhere(new Brackets((bb) => {
+            bb.where('o.createdAt = :cts', { cts: new Date(cursor.ts) })
+              .andWhere('o.id < :cid', { cid: cursor.id });
+          }));
+      }));
+    }
+
+    // ترتيب + حد
+    qb.orderBy('o.createdAt', 'DESC')
+      .addOrderBy('o.id', 'DESC')
+      .take(limit + 1);
+
+    // جلب البيانات
+    const rows = await qb.getMany();
+    const hasMore = rows.length > limit;
+    const pageItems = hasMore ? rows.slice(0, limit) : rows;
+
+    const last = pageItems[pageItems.length - 1] || null;
+    const nextCursor = last
+      ? encodeCursor(toEpochMs(last.createdAt as any), String(last.id))
+      : null;
+
+    // ====== حسابات TRY مثل getAllOrders ======
+
+    // أسعار الصرف
+    const currencies = await this.currenciesRepo.find();
+    const getRate = (code: string) => {
+      const row = currencies.find((c) => c.code.toUpperCase() === code.toUpperCase());
+      return row ? Number(row.rate) : undefined;
+    };
+    const TRY_RATE = getRate('TRY') ?? 1;
+    const toTRY = (amount: number, code?: string) => {
+      const c = (code || 'TRY').toUpperCase();
+      if (c === 'TRY') return amount;
+      const r = getRate(c);
+      return r && r > 0 ? amount * (TRY_RATE / r) : amount;
+    };
+
+    // معرّف نوع المزوّد (للتحويل الخاص بـ znet)
+    const integrations = await this.integrations.list();
+    const providerKind = new Map<string, string>();
+    for (const it of integrations as any[]) providerKind.set(it.id, it.provider);
+
+    // أداة صورة
+    const pickImage = (obj: any): string | null =>
+      obj ? (obj.imageUrl ?? obj.image ?? obj.logoUrl ?? obj.iconUrl ?? obj.icon ?? null) : null;
+
+    // المجمّدات للطلبات المعتمدة
+    const approvedIds = pageItems
+      .filter((o) => o.status === 'approved')
+      .map((o) => o.id);
+
+    let frozenMap = new Map<
+      string,
+      {
+        fxLocked: boolean;
+        sellTryAtApproval: number | null;
+        costTryAtApproval: number | null;
+        profitTryAtApproval: number | null;
+        approvedLocalDate: string | null;
+      }
+    >();
+
+    if (approvedIds.length) {
+      const rowsFx = await this.ordersRepo.query(
+        `SELECT id,
+                COALESCE("fxLocked", false)           AS "fxLocked",
+                "sellTryAtApproval",
+                "costTryAtApproval",
+                "profitTryAtApproval",
+                "approvedLocalDate"
+        FROM "product_orders"
+        WHERE id = ANY($1::uuid[])`,
+        [approvedIds],
+      );
+      frozenMap = new Map(
+        rowsFx.map((r: any) => [
+          String(r.id),
+          {
+            fxLocked: !!r.fxLocked,
+            sellTryAtApproval:
+              r.sellTryAtApproval != null ? Number(r.sellTryAtApproval) : null,
+            costTryAtApproval:
+              r.costTryAtApproval != null ? Number(r.costTryAtApproval) : null,
+            profitTryAtApproval:
+              r.profitTryAtApproval != null ? Number(r.profitTryAtApproval) : null,
+            approvedLocalDate: r.approvedLocalDate ? String(r.approvedLocalDate) : null,
+          },
+        ]),
+      );
+    }
+
+    const items = pageItems.map((o) => {
+      const priceUSD = Number((o as any).price || 0); // إجمالي بالدولار
+      const isExternal = !!(o.providerId && o.externalOrderId);
+      const providerType = o.providerId ? providerKind.get(o.providerId) : undefined;
+
+      const frozen = frozenMap.get(o.id);
+      const isFrozen = !!(frozen && frozen.fxLocked && o.status === 'approved');
+
+      let sellTRY: number;
+      let costTRY: number;
+      let profitTRY: number;
+
+      if (isFrozen) {
+        sellTRY = Number((frozen!.sellTryAtApproval ?? 0).toFixed(2));
+        costTRY = Number((frozen!.costTryAtApproval ?? 0).toFixed(2));
+        const pf =
+          frozen!.profitTryAtApproval != null
+            ? Number(frozen!.profitTryAtApproval)
+            : sellTRY - costTRY;
+        profitTRY = Number(pf.toFixed(2));
+      } else {
+        // التكلفة
+        if (isExternal) {
+          const amt = Math.abs(Number((o as any).costAmount ?? 0));
+          let cur = String((o as any).costCurrency || '').toUpperCase().trim();
+          if (providerType === 'znet') cur = 'TRY';
+          if (!cur) cur = 'USD';
+          costTRY = toTRY(amt, cur);
+        } else {
+          const baseUSD = Number(
+            ((o as any).package?.basePrice ?? (o as any).package?.capital ?? 0),
+          );
+          const qty = Number(o.quantity ?? 1);
+          costTRY = baseUSD * qty * TRY_RATE;
+        }
+
+        // البيع والربح
+        sellTRY = priceUSD * TRY_RATE;
+        profitTRY = sellTRY - costTRY;
+
+        // تقريب
+        sellTRY = Number(sellTRY.toFixed(2));
+        costTRY = Number(costTRY.toFixed(2));
+        profitTRY = Number(profitTRY.toFixed(2));
+      }
+
+      const username = (o as any).user?.username ?? null;
+      const userEmail = (o as any).user?.email ?? null;
+
+      return {
+        id: o.id,
+        orderNo: (o as any).orderNo ?? null,
+        status: o.status,
+        createdAt: o.createdAt?.toISOString?.() ?? new Date(o.createdAt as any).toISOString(),
+
+        username,
+        userEmail,
+
+        providerId: o.providerId ?? null,
+        externalOrderId: o.externalOrderId ?? null,
+        userIdentifier: o.userIdentifier ?? null,
+
+        currencyTRY: 'TRY',
+        sellTRY,
+        costTRY,
+        profitTRY,
+
+        product: o.product
+          ? { id: o.product.id, name: o.product.name, imageUrl: pickImage(o.product) }
+          : null,
+        package: o.package
+          ? { id: o.package.id, name: o.package.name, imageUrl: pickImage(o.package) }
+          : null,
+
+        sentAt: (o as any).sentAt ? (o as any).sentAt.toISOString?.() ?? null : null,
+        completedAt: (o as any).completedAt
+          ? (o as any).completedAt.toISOString?.() ?? null
+          : null,
+
+        fxLocked: isFrozen,
+        approvedLocalDate: frozen?.approvedLocalDate ?? null,
+      };
+    });
+
+    return {
+      items,
+      pageInfo: { nextCursor, hasMore },
+      meta: {
+        limit,
+        appliedFilters: {
+          q: dto.q || '',
+          status: dto.status || '',
+          method: dto.method || '',
+          from: dto.from || '',
+          to: dto.to || '',
+        },
+      },
+    };
+  }
+
+  async listOrdersForAdmin(dto: ListOrdersDto) {
+    const limit = Math.max(1, Math.min(100, dto.limit ?? 25));
+    const cursor = decodeCursor(dto.cursor);
+
+    // --- أسعار العملات ---
+    const currencies = await this.currenciesRepo.find();
+    const getRate = (code: string) => {
+      const row = currencies.find((c) => c.code.toUpperCase() === code.toUpperCase());
+      return row ? Number(row.rate) : undefined;
+    };
+    const TRY_RATE = getRate('TRY') ?? 1;
+    const toTRY = (amount: number, code?: string) => {
+      const c = (code || 'TRY').toUpperCase();
+      if (c === 'TRY') return amount;
+      const r = getRate(c);
+      if (!r || !Number.isFinite(r) || r <= 0) return amount;
+      return amount * (TRY_RATE / r);
+    };
+
+    const pickImage = (obj: any): string | null =>
+      obj ? (obj.imageUrl ?? obj.image ?? obj.logoUrl ?? obj.iconUrl ?? obj.icon ?? null) : null;
+
+    // --- خريطة المزوّدين لمعرفة znet إلخ
+    const integrations = await this.integrations.list();
+    const providersMap = new Map<string, string>();
+    for (const it of integrations as any[]) providersMap.set(it.id, it.provider);
+
+    // --- الفلاتر + keyset pagination
+    const qb = this.ordersRepo
+      .createQueryBuilder('o')
+      .leftJoinAndSelect('o.user', 'u')
+      .leftJoinAndSelect('u.currency', 'uc')
+      .leftJoinAndSelect('o.product', 'prod')
+      .leftJoinAndSelect('o.package', 'pkg');
+
+    if (dto.status) qb.andWhere('o.status = :status', { status: dto.status });
+
+    if (dto.method === 'manual') {
+      qb.andWhere('(o.providerId IS NULL OR o.externalOrderId IS NULL)');
+    } else if (dto.method) {
+      qb.andWhere('o.providerId = :pid AND o.externalOrderId IS NOT NULL', { pid: dto.method });
+    }
+
+    if (dto.from) qb.andWhere('o.createdAt >= :from', { from: new Date(dto.from + 'T00:00:00Z') });
+    if (dto.to)   qb.andWhere('o.createdAt <= :to',   { to:   new Date(dto.to   + 'T23:59:59Z') });
+
+    if (dto.q && dto.isQDigitsOnly) {
+      const qd = dto.qDigits;
+      qb.andWhere(new Brackets(b => {
+        b.where('CAST(o.orderNo AS TEXT) = :qd', { qd })
+        .orWhere('o.userIdentifier = :qd', { qd })
+        .orWhere('o.externalOrderId = :qd', { qd });
+      }));
+    } else if (dto.q) {
+      const q = `%${(dto.q || '').trim().toLowerCase()}%`;
+      qb.andWhere(new Brackets(b => {
+        b.where('LOWER(prod.name) LIKE :q', { q })
+        .orWhere('LOWER(pkg.name) LIKE :q', { q })
+        .orWhere('LOWER(u.username) LIKE :q', { q })
+        .orWhere('LOWER(u.email) LIKE :q', { q })
+        .orWhere('LOWER(o.externalOrderId) LIKE :q', { q });
+      }));
+    }
+
+    if (cursor) {
+      qb.andWhere(new Brackets(b => {
+        b.where('o.createdAt < :cts', { cts: new Date(cursor.ts) })
+        .orWhere(new Brackets(bb => {
+          bb.where('o.createdAt = :cts', { cts: new Date(cursor.ts) })
+            .andWhere('o.id < :cid', { cid: cursor.id });
+        }));
+      }));
+    }
+
+    qb.orderBy('o.createdAt', 'DESC')
+      .addOrderBy('o.id', 'DESC')
+      .take(limit + 1);
+
+    const rows = await qb.getMany();
+    const hasMore = rows.length > limit;
+    const pageItems = hasMore ? rows.slice(0, limit) : rows;
+
+    // --- تجميد FX للطلبات المقبولة (نقرأها دفعة واحدة)
+    const approvedIds = pageItems.filter(o => o.status === 'approved').map(o => o.id);
+    let frozenMap = new Map<string, {
+      fxLocked: boolean;
+      sellTryAtApproval: number | null;
+      costTryAtApproval: number | null;
+      profitTryAtApproval: number | null;
+      approvedLocalDate: string | null;
+    }>();
+    if (approvedIds.length) {
+      const rowsFrozen = await this.ordersRepo.query(
+        `SELECT id,
+                COALESCE("fxLocked", false)           AS "fxLocked",
+                "sellTryAtApproval",
+                "costTryAtApproval",
+                "profitTryAtApproval",
+                "approvedLocalDate"
+          FROM "product_orders"
+          WHERE id = ANY($1::uuid[])`,
+        [approvedIds],
+      );
+      frozenMap = new Map(
+        rowsFrozen.map((r: any) => [
+          String(r.id),
+          {
+            fxLocked: !!r.fxLocked,
+            sellTryAtApproval: r.sellTryAtApproval != null ? Number(r.sellTryAtApproval) : null,
+            costTryAtApproval: r.costTryAtApproval != null ? Number(r.costTryAtApproval) : null,
+            profitTryAtApproval: r.profitTryAtApproval != null ? Number(r.profitTryAtApproval) : null,
+            approvedLocalDate: r.approvedLocalDate ? String(r.approvedLocalDate) : null,
+          },
+        ]),
+      );
+    }
+
+    const items = pageItems.map((o) => {
+      const priceUSD = Number(o.price || 0);
+      const unitPriceUSD = o.quantity ? priceUSD / Number(o.quantity) : priceUSD;
+
+      const providerType = o.providerId ? providersMap.get(o.providerId) : undefined;
+      const isExternal = !!(o.providerId && o.externalOrderId);
+
+      const frozen = frozenMap.get(o.id);
+      const isFrozen = !!(frozen && frozen.fxLocked && o.status === 'approved');
+
+      let sellTRY: number;
+      let costTRY: number;
+      let profitTRY: number;
+
+      if (isFrozen) {
+        sellTRY = Number((frozen!.sellTryAtApproval ?? 0).toFixed(2));
+        costTRY = Number((frozen!.costTryAtApproval ?? 0).toFixed(2));
+        const p = frozen!.profitTryAtApproval != null
+          ? Number(frozen!.profitTryAtApproval)
+          : (sellTRY - costTRY);
+        profitTRY = Number(p.toFixed(2));
+      } else {
+        if (isExternal) {
+          const amt = Math.abs(Number(o.costAmount ?? 0));
+          let cur = String(o.costCurrency || '').toUpperCase().trim();
+          if (providerType === 'znet') cur = 'TRY';
+          if (!cur) cur = 'USD';
+          costTRY = toTRY(amt, cur);
+        } else {
+          const baseUSD = Number((o as any).package?.basePrice ?? (o as any).package?.capital ?? 0);
+          const qty = Number(o.quantity ?? 1);
+          costTRY = (baseUSD * qty) * TRY_RATE;   // 👈 Manual = تحويل إلى ليرة دائمًا
+        }
+
+        sellTRY   = priceUSD * TRY_RATE;         // 👈 سعر المبيع دائمًا بالليرة
+        profitTRY = sellTRY - costTRY;
+
+        sellTRY   = Number(sellTRY.toFixed(2));
+        costTRY   = Number(costTRY.toFixed(2));
+        profitTRY = Number(profitTRY.toFixed(2));
+      }
+
+      const userRate = o.user?.currency ? Number(o.user.currency.rate) : 1;
+      const userCode = o.user?.currency ? o.user.currency.code : 'USD';
+
+      return {
+        id: o.id,
+        orderNo: (o as any).orderNo ?? null,
+        username: (o.user as any)?.username ?? null,
+        userEmail: (o.user as any)?.email ?? null,
+
+        product: { id: o.product?.id, name: o.product?.name, imageUrl: pickImage((o as any).product) },
+        package: { id: o.package?.id, name: o.package?.name, imageUrl: pickImage((o as any).package) },
+
+        status: o.status,
+        providerId: o.providerId ?? null,
+        externalOrderId: o.externalOrderId ?? null,
+        userIdentifier: o.userIdentifier ?? null,
+
+        quantity: o.quantity,
+        priceUSD,
+        sellTRY,
+        costTRY,
+        profitTRY,
+        currencyTRY: 'TRY',
+
+        // للعرض الجانبي إن أردت
+        sellPriceAmount: priceUSD * userRate,
+        sellPriceCurrency: userCode,
+
+        fxLocked: isFrozen,
+        approvedLocalDate: frozen?.approvedLocalDate ?? null,
+
+        sentAt: o.sentAt ? o.sentAt.toISOString() : null,
+        completedAt: o.completedAt ? o.completedAt.toISOString() : null,
+        durationMs: (o as any).durationMs ?? null,
+        createdAt: o.createdAt.toISOString(),
+      };
+    });
+
+    const last = items[items.length - 1] || null;
+    const nextCursor = last ? encodeCursor(toEpochMs(new Date(last.createdAt)), String(last.id)) : null;
+
+    return {
+      items,
+      pageInfo: { nextCursor, hasMore },
+      meta: {
+        limit,
+        appliedFilters: {
+          q: dto.q || '',
+          status: dto.status || '',
+          method: dto.method || '',
+          from: dto.from || '',
+          to: dto.to || '',
+        },
+      },
+    };
+  }
+
+} 
+
+
+
+

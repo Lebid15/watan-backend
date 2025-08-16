@@ -1,3 +1,4 @@
+// src/products/product-orders.admin.controller.ts
 import {
   Controller,
   Get,
@@ -10,6 +11,8 @@ import {
   BadRequestException,
   ParseUUIDPipe,
   Logger,
+  Query,
+  Header,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
@@ -26,6 +29,7 @@ import { PackageRouting } from '../integrations/package-routing.entity';
 import { PackageCost } from '../integrations/package-cost.entity';
 import { PackageMapping } from '../integrations/package-mapping.entity';
 import { IntegrationsService } from '../integrations/integrations.service';
+import { ListOrdersDto } from './dto/list-orders.dto';
 
 type ExternalStatus =
   | 'not_sent'
@@ -61,8 +65,113 @@ export class ProductOrdersAdminController {
     private readonly mappingRepo: Repository<PackageMapping>,
   ) {}
 
-  /** 🔹 جلب كل الطلبات */
+  /** تحويل Decimals/strings إلى number */
+  private num(v: any): number | undefined {
+    if (v == null) return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  }
+
+  /** تفطيح كائن الطلب لشكل يناسب الواجهة */
+  private toClient(o: ProductOrder) {
+    // TRY المجمّدة عند الاعتماد أولًا، ثم بدائل بسيطة
+    const sellTRY =
+      this.num((o as any).sellTryAtApproval) ??
+      (o.sellPriceCurrency === 'TRY'
+        ? this.num((o as any).sellPriceAmount ?? (o as any).price)
+        : undefined);
+
+    const costTRY =
+      this.num((o as any).costTryAtApproval) ??
+      (o.costCurrency === 'TRY' ? this.num((o as any).costAmount) : undefined);
+
+    const profitTRY =
+      this.num((o as any).profitTryAtApproval) ??
+      (sellTRY != null && costTRY != null
+        ? Number((sellTRY - costTRY).toFixed(2))
+        : undefined);
+
+    const currencyTRY =
+      sellTRY != null || costTRY != null || profitTRY != null ? 'TRY' : undefined;
+
+    return {
+      id: o.id,
+      orderNo: (o as any).orderNo ?? null,
+      status: o.status,
+      userIdentifier: (o as any).userIdentifier ?? null,
+
+      // مستخدم مسطّح
+      username:
+        ((o as any).user && ((o as any).user.username || (o as any).user.fullName)) || undefined,
+      userEmail: ((o as any).user && (o as any).user.email) || undefined,
+
+      // المنتج والباقة (لللوغو والاسم)
+      product: o.product
+        ? {
+            id: (o.product as any).id,
+            name: (o.product as any).name,
+            imageUrl:
+              (o.product as any).imageUrl ||
+              (o.product as any).image ||
+              (o.product as any).logoUrl ||
+              (o.product as any).iconUrl ||
+              null,
+          }
+        : undefined,
+      package: o.package
+        ? {
+            id: (o.package as any).id,
+            name: (o.package as any).name,
+            imageUrl:
+              (o.package as any).imageUrl ||
+              (o.package as any).image ||
+              (o.package as any).logoUrl ||
+              (o.package as any).iconUrl ||
+              null,
+            productId: (o.product as any)?.id ?? null,
+          }
+        : undefined,
+
+      // ربط خارجي
+      providerId: (o as any).providerId ?? null,
+      providerName: null as string | null, // تُقرأ من /admin/integrations في الواجهة
+      externalOrderId: (o as any).externalOrderId ?? null,
+
+      // أزمنة
+      createdAt: o.createdAt,
+      sentAt: (o as any).sentAt ?? null,
+      completedAt: (o as any).completedAt ?? null,
+      durationMs: (o as any).durationMs ?? null,
+
+      // التجميد/الموافقة
+      fxLocked: (o as any).fxLocked ?? false,
+      approvedLocalDate: (o as any).approvedLocalDate ?? undefined,
+
+      // القيم الأصلية (لمن يلزم)
+      sellPriceAmount: this.num((o as any).sellPriceAmount ?? (o as any).price),
+      sellPriceCurrency: (o as any).sellPriceCurrency ?? 'USD',
+      costAmount: this.num((o as any).costAmount),
+      costCurrency: (o as any).costCurrency ?? 'USD',
+      price: this.num((o as any).price),
+
+      // قيم العرض المطلوبة للجدول
+      sellTRY,
+      costTRY,
+      profitTRY,
+      currencyTRY,
+    };
+  }
+
   @Get()
+  @Header('Cache-Control', 'no-store')
+  async list(@Query() query: ListOrdersDto) {
+    // تُرجع items فيها sellTRY/costTRY/profitTRY + pageInfo
+    return this.productsService.listOrdersForAdmin(query);
+  }
+
+
+
+  @Get('all')
   async getAllOrders() {
     return this.productsService.getAllOrders();
   }
@@ -77,12 +186,12 @@ export class ProductOrdersAdminController {
     for (const order of orders) {
       order.providerId = null;
       order.externalOrderId = null;
-      order.externalStatus = 'not_sent';
-      order.sentAt = null;
-      order.lastSyncAt = null;
-      order.completedAt = null;
-      order.durationMs = null;
-      if (note) order.manualNote = note.slice(0, 500);
+      (order as any).externalStatus = 'not_sent';
+      (order as any).sentAt = null;
+      (order as any).lastSyncAt = null;
+      (order as any).completedAt = null;
+      (order as any).durationMs = null;
+      if (note) (order as any).manualNote = note.slice(0, 500);
       await this.orderRepo.save(order);
 
       await this.logRepo.save(
@@ -118,7 +227,7 @@ export class ProductOrdersAdminController {
 
     for (const order of orders) {
       try {
-        if (order.externalOrderId) {
+        if ((order as any).externalOrderId) {
           results.push({ id: order.id, ok: false, message: 'already sent' });
           continue;
         }
@@ -153,7 +262,7 @@ export class ProductOrdersAdminController {
     for (const order of orders) {
       try {
         if (note) {
-          order.manualNote = note.slice(0, 500);
+          (order as any).manualNote = note.slice(0, 500);
           await this.orderRepo.save(order);
         }
         await this.productsService.updateOrderStatus(order.id, 'approved');
@@ -187,7 +296,7 @@ export class ProductOrdersAdminController {
     for (const order of orders) {
       try {
         if (note) {
-          order.manualNote = note.slice(0, 500);
+          (order as any).manualNote = note.slice(0, 500);
           await this.orderRepo.save(order);
         }
         await this.productsService.updateOrderStatus(order.id, 'rejected');
@@ -217,7 +326,7 @@ export class ProductOrdersAdminController {
     const order = await this.orderRepo.findOne({ where: { id } });
     if (!order) throw new NotFoundException('الطلب غير موجود');
 
-    if (order.externalOrderId) {
+    if ((order as any).externalOrderId) {
       throw new BadRequestException('الطلب تم إرساله مسبقًا');
     }
 
@@ -230,14 +339,14 @@ export class ProductOrdersAdminController {
   async refreshOrder(@Param('id', new ParseUUIDPipe()) id: string) {
     const order = await this.orderRepo.findOne({ where: { id } });
     if (!order) throw new NotFoundException('الطلب غير موجود');
-    if (!order.providerId || !order.externalOrderId) {
+    if (!(order as any).providerId || !(order as any).externalOrderId) {
       throw new BadRequestException('الطلب غير مرسل خارجيًا');
     }
 
-    // ✅ إيقاف مبكّر: لا تفحص طلبات منتهية
+    // إيقاف مبكّر
     if (
-      order.externalStatus === 'done' ||
-      order.externalStatus === 'failed' ||
+      (order as any).externalStatus === 'done' ||
+      (order as any).externalStatus === 'failed' ||
       order.status === 'approved' ||
       order.status === 'rejected'
     ) {
@@ -245,21 +354,19 @@ export class ProductOrdersAdminController {
     }
 
     try {
-      const res = await this.integrations.checkOrders(order.providerId, [order.externalOrderId]);
+      const res = await this.integrations.checkOrders(
+        (order as any).providerId,
+        [(order as any).externalOrderId],
+      );
       const first = Array.isArray(res) ? res[0] : res;
 
-      // ✅ أولوية للماب الجاهز من الدرايفر (success|pending|failed)
-      let statusRaw: string | undefined = first?.mappedStatus;
-
-      // ✅ Fallback: لو providerStatus جاء كود رقمي 1/2/3 (وفق جدولك)
+      let statusRaw: string | undefined = (first as any)?.mappedStatus;
       if (!statusRaw) {
-        const code = String(first?.providerStatus ?? '').trim();
-        if (code === '1') statusRaw = 'pending'; // انتظار
-        else if (code === '2') statusRaw = 'success'; // قبول
-        else if (code === '3') statusRaw = 'failed'; // رفض
+        const code = String((first as any)?.providerStatus ?? '').trim();
+        if (code === '1') statusRaw = 'pending';
+        else if (code === '2') statusRaw = 'success';
+        else if (code === '3') statusRaw = 'failed';
       }
-
-      // ✅ آخر fallback لبقية الحقول المحتملة
       statusRaw =
         statusRaw ??
         (first as any)?.status ??
@@ -269,25 +376,29 @@ export class ProductOrdersAdminController {
         'processing';
 
       const message: string =
-        (first?.raw && (first.raw.message || first.raw.desc || first.raw.raw)) || 'sent';
+        ((first as any)?.raw &&
+          (((first as any).raw.message as any) ||
+            (first as any).raw.desc ||
+            (first as any).raw.raw)) ||
+        'sent';
 
-      // ملاحظة: إن لم تكن قد عدّلت توقيع الدالة لتقبل undefined،
-      // استعمل || 'processing' لتطمين TypeScript.
       const extStatus = this.normalizeExternalStatus(statusRaw || 'processing');
 
-      order.externalStatus = extStatus;
-      order.lastSyncAt = new Date();
-      order.lastMessage = String(message || '').slice(0, 250) || null;
+      (order as any).externalStatus = extStatus;
+      (order as any).lastSyncAt = new Date();
+      (order as any).lastMessage = String(message || '').slice(0, 250) || null;
 
       const isTerminal = extStatus === 'done' || extStatus === 'failed';
       if (isTerminal) {
-        order.completedAt = new Date();
-        order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : 0;
+        (order as any).completedAt = new Date();
+        (order as any).durationMs = (order as any).sentAt
+          ? (order as any).completedAt.getTime() -
+            (order as any).sentAt.getTime()
+          : 0;
       }
 
       await this.orderRepo.save(order);
 
-      // ربط الحالة الداخلية بالحالة الخارجية النهائية
       if (extStatus === 'done') {
         await this.productsService.updateOrderStatus(order.id, 'approved');
       } else if (extStatus === 'failed') {
@@ -332,46 +443,38 @@ export class ProductOrdersAdminController {
       throw new NotFoundException('الحالة غير صحيحة');
     }
 
-    // نجلب الطلب (سنحتاج حقول التتبّع)
     const order = await this.orderRepo.findOne({ where: { id } });
     if (!order) throw new NotFoundException('الطلب غير موجود');
 
-    // حفظ الملاحظة اليدوية (إن وجدت)
     if (note) {
-      order.manualNote = note.slice(0, 500);
+      (order as any).manualNote = note.slice(0, 500);
       await this.orderRepo.save(order);
     }
 
-    // ✅ حدّث الحالة الداخلية (يتكفّل بالاسترجاع عند الرفض)
     const updated = await this.productsService.updateOrderStatus(id, status);
     if (!updated) throw new NotFoundException('تعذّر تحديث حالة الطلب');
 
-    // ✅ اختم خارجيًا أيضاً لإيقاف أي polling/فحص تلقائي
-    // approved  -> externalStatus = 'done'
-    // rejected  -> externalStatus = 'failed'
-    const terminalExternal = status === 'approved' ? 'done' : 'failed' as const;
+    const terminalExternal = status === 'approved' ? 'done' : ('failed' as const);
 
-    // احسب زمن التنفيذ إن لم يكن محسوبًا
     const completedAt = new Date();
-    const durationMs = updated.sentAt
-      ? completedAt.getTime() - new Date(updated.sentAt).getTime()
-      : (updated.durationMs ?? 0);
+    const durationMs = (updated as any).sentAt
+      ? completedAt.getTime() - new Date((updated as any).sentAt).getTime()
+      : (updated as any).durationMs ?? 0;
 
     await this.orderRepo.update(
-      { id: updated.id },
+      { id: (updated as any).id },
       {
         externalStatus: terminalExternal,
         completedAt,
         durationMs,
         lastSyncAt: new Date(),
         lastMessage: status === 'approved' ? 'Manual approval' : 'Manual rejection',
-      },
+      } as any,
     );
 
-    // لوج
     await this.logRepo.save(
       this.logRepo.create({
-        order: { id: updated.id } as any,
+        order: { id: (updated as any).id } as any,
         action: 'dispatch',
         result: status === 'approved' ? 'success' : 'fail',
         message: `Manual ${status}`,
@@ -379,9 +482,7 @@ export class ProductOrdersAdminController {
       }),
     );
 
-    // أعدّ التحميل بعد التحديث الخارجي لإرجاع الحالة النهائية
-    const finalOrder = await this.orderRepo.findOne({ where: { id: updated.id } });
-
+    const finalOrder = await this.orderRepo.findOne({ where: { id: (updated as any).id } });
     return { message: 'تم تحديث حالة الطلب بنجاح', order: finalOrder };
   }
 
@@ -417,9 +518,8 @@ export class ProductOrdersAdminController {
     providerId?: string | null,
     note?: string,
   ) {
-    // ✅ تأكيد العلاقات اللازمة قبل أي استخدام
     const order =
-      orderInput?.package && orderInput?.user
+      (orderInput as any)?.package && (orderInput as any)?.user
         ? orderInput
         : await this.orderRepo.findOne({
             where: { id: orderInput.id },
@@ -427,13 +527,13 @@ export class ProductOrdersAdminController {
           });
 
     if (!order) throw new NotFoundException('الطلب غير موجود (relations)');
-    if (!order.package) throw new BadRequestException('لا توجد باقة مرتبطة بالطلب');
-    if (!order.user) throw new BadRequestException('لا يوجد مستخدم مرتبط بالطلب');
+    if (!(order as any).package) throw new BadRequestException('لا توجد باقة مرتبطة بالطلب');
+    if (!(order as any).user) throw new BadRequestException('لا يوجد مستخدم مرتبط بالطلب');
 
     let chosenProviderId = providerId ?? null;
     if (!chosenProviderId) {
       const routing = await this.routingRepo.findOne({
-        where: { package: { id: order.package.id } as any },
+        where: { package: { id: (order as any).package.id } as any },
         relations: ['package'],
       });
       if (!routing || routing.mode === 'manual' || !routing.primaryProviderId) {
@@ -444,7 +544,7 @@ export class ProductOrdersAdminController {
 
     const mapping = await this.mappingRepo.findOne({
       where: {
-        our_package_id: order.package.id as any,
+        our_package_id: (order as any).package.id as any,
         provider_api_id: chosenProviderId as any,
       },
     });
@@ -453,27 +553,27 @@ export class ProductOrdersAdminController {
     }
 
     const costRow = await this.costRepo.findOne({
-      where: { package: { id: order.package.id } as any, providerId: chosenProviderId as any },
+      where: { package: { id: (order as any).package.id } as any, providerId: chosenProviderId as any },
       relations: ['package'],
     });
 
-    const costCurrency = (costRow?.costCurrency as any) ?? 'USD';
-    const basePrice = Number((order.package as any)?.basePrice ?? 0);
+    const costCurrency = (costRow as any)?.costCurrency ?? 'USD';
+    const basePrice = Number(((order as any).package as any)?.basePrice ?? 0);
     const costAmount =
-      Number(costRow?.costAmount ?? 0) > 0 ? Number(costRow!.costAmount) : basePrice;
+      Number((costRow as any)?.costAmount ?? 0) > 0 ? Number((costRow as any).costAmount) : basePrice;
 
     const musteriTel =
-      (order.user as any)?.phoneNumber && String((order.user as any).phoneNumber).trim().length > 0
-        ? String((order.user as any).phoneNumber).trim()
+      ((order as any).user as any)?.phoneNumber &&
+      String(((order as any).user as any).phoneNumber).trim().length > 0
+        ? String(((order as any).user as any).phoneNumber).trim()
         : '111111111';
 
     let oyun: string | undefined;
     let kupur: string | undefined;
 
-    // ⚠️ syncProducts قد تكون مكلفة؛ يمكن لاحقًا استبدالها بكاش مركزي
     const providerProducts = await this.integrations.syncProducts(chosenProviderId!);
     const matched = providerProducts.find(
-      (p: any) => String(p.externalId) === String(mapping.provider_package_id),
+      (p: any) => String(p.externalId) === String((mapping as any).provider_package_id),
     );
     if (matched?.meta) {
       oyun = matched.meta.oyun ?? matched.meta.oyun_bilgi_id ?? undefined;
@@ -481,10 +581,10 @@ export class ProductOrdersAdminController {
     }
 
     const payload = {
-      productId: String(mapping.provider_package_id),
-      qty: Number(order.quantity ?? 1),
+      productId: String((mapping as any).provider_package_id),
+      qty: Number((order as any).quantity ?? 1),
       params: {
-        oyuncu_bilgi: order.userIdentifier ?? undefined,
+        oyuncu_bilgi: (order as any).userIdentifier ?? undefined,
         musteri_tel: musteriTel,
         oyun,
         kupur,
@@ -493,45 +593,44 @@ export class ProductOrdersAdminController {
     };
 
     this.logger.debug(
-      `dispatch -> provider=${chosenProviderId} pkgMap=${mapping.provider_package_id} oyun=${oyun} kupur=${kupur} user=${order.userIdentifier}`,
+      `dispatch -> provider=${chosenProviderId} pkgMap=${(mapping as any).provider_package_id} oyun=${oyun} kupur=${kupur} user=${(order as any).userIdentifier}`,
     );
 
     const res = await this.integrations.placeOrder(chosenProviderId!, payload);
 
     const externalOrderId = (res as any)?.externalOrderId ?? null;
     const statusRaw: string =
-      (res as any)?.providerStatus ??
-      ((res as any)?.mappedStatus as any) ??
-      'sent';
+      (res as any)?.providerStatus ?? ((res as any)?.mappedStatus as any) ?? 'sent';
 
     const message: string =
-      ((res as any)?.raw && ((res as any).raw.message || (res as any).raw.desc || (res as any).raw.raw)) ||
+      ((res as any)?.raw &&
+        (((res as any).raw.message as any) || (res as any).raw.desc || (res as any).raw.raw)) ||
       'sent';
     const extStatus = this.normalizeExternalStatus(statusRaw || 'processing');
-    let finalCostAmount = costAmount;           // من PackageCost/basePrice كـ fallback
-    let finalCostCurrency = costCurrency;       // من PackageCost كـ fallback
+
+    let finalCostAmount = costAmount;
+    let finalCostCurrency = costCurrency;
 
     if (res && typeof (res as any).price === 'number') {
-      finalCostAmount   = Number((res as any).price);
+      finalCostAmount = Number((res as any).price);
       finalCostCurrency = ((res as any).costCurrency as string) || finalCostCurrency;
     }
-    order.providerId = chosenProviderId!;
-    order.externalOrderId = externalOrderId;
-    order.externalStatus = extStatus;
-    order.sentAt = new Date();
-    order.lastSyncAt = new Date();
-    order.lastMessage = String(message ?? '').slice(0, 250);
-    order.attempts = (order.attempts ?? 0) + 1;
 
-    // احفظ التكلفة + العملة
-    order.costCurrency = finalCostCurrency;
-    order.costAmount   = Number(finalCostAmount.toFixed(2));
+    (order as any).providerId = chosenProviderId!;
+    (order as any).externalOrderId = externalOrderId;
+    (order as any).externalStatus = extStatus;
+    (order as any).sentAt = new Date();
+    (order as any).lastSyncAt = new Date();
+    (order as any).lastMessage = String(message ?? '').slice(0, 250);
+    (order as any).attempts = ((order as any).attempts ?? 0) + 1;
 
-    // الربح = بيع - تكلفة
-    const sell = Number(order.sellPriceAmount ?? order.price ?? 0);
-    order.profitAmount = Number((sell - order.costAmount).toFixed(2));
+    (order as any).costCurrency = finalCostCurrency;
+    (order as any).costAmount = Number(finalCostAmount.toFixed(2));
 
-    if (note) order.manualNote = note.slice(0, 500);
+    const sell = Number((order as any).sellPriceAmount ?? (order as any).price ?? 0);
+    (order as any).profitAmount = Number((sell - (order as any).costAmount).toFixed(2));
+
+    if (note) (order as any).manualNote = note.slice(0, 500);
 
     await this.orderRepo.save(order);
 
