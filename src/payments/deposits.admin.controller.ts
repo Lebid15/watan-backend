@@ -9,23 +9,18 @@ import { ListDepositsDto } from './dto/list-deposits.dto';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN)
-// ملاحظة: أبقينا نفس المسار القديم كي لا نكسر أي عميل يعتمد عليه
 @Controller('admin/deposits')
 export class DepositsAdminController {
-  constructor(private readonly service: DepositsService) {}
+  constructor(private readonly depositsService: DepositsService) {}
 
-  /**
-   * GET /admin/deposits
-   * يدعم: limit, cursor, q, status, methodId, from, to
-   * ويعيد: { items, pageInfo: { nextCursor, hasMore }, meta }
-   */
+  /** GET /admin/deposits?limit=&cursor=&q=&status=&methodId=&from=&to= */
   @Get()
   list(@Query() query: ListDepositsDto) {
-    return this.service.listDepositsWithPagination(query);
+    return this.depositsService.listWithPagination(query);
   }
 
   @Patch(':id/status')
   setStatus(@Param('id') id: string, @Body() dto: UpdateDepositStatusDto) {
-    return this.service.setStatus(id, dto.status);
+    return this.depositsService.setStatus(id, dto.status);
   }
 }

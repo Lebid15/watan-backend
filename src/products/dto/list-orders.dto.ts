@@ -1,62 +1,48 @@
-// src/products/dto/list-orders.dto.ts
-import { IsIn, IsOptional, IsString, IsNumber, Min, Max } from 'class-validator';
-import { Transform } from 'class-transformer';
-
-export type OrderStatus = 'pending' | 'approved' | 'rejected';
-
-const DIGIT_MAP: Record<string, string> = {
-  '٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9',
-  '۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9',
-};
-function normalizeDigits(s: string) {
-  return s.replace(/[٠-٩۰-۹]/g, ch => DIGIT_MAP[ch] ?? ch);
-}
-function normalizeText(s: string) {
-  return s
-    .toLowerCase()
-    .replace(/[\u200c\u200d\u200e\u200f\u061C]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+import { Type } from 'class-transformer';
+import { IsIn, IsNumber, IsOptional, IsString, Matches, Min } from 'class-validator';
 
 export class ListOrdersDto {
-  @IsOptional() @IsString()
-  @Transform(({ value }) => (typeof value === 'string' ? normalizeText(value) : ''))
-  q?: string = '';
+  @IsOptional()
+  @IsString()
+  q?: string;
 
-  @IsOptional() @IsString()
-  @IsIn(['pending', 'approved', 'rejected', ''])
-  status?: '' | OrderStatus = '';
+  @IsOptional()
+  @IsIn(['pending', 'approved', 'rejected'])
+  status?: 'pending' | 'approved' | 'rejected';
 
-  /** method: '' | 'manual' | providerId */
-  @IsOptional() @IsString()
-  method?: string = '';
+  // '' | 'manual' | providerId
+  @IsOptional()
+  @IsString()
+  method?: string;
 
-  @IsOptional() @IsString()
-  from?: string = ''; // YYYY-MM-DD
+  // تنسيق YYYY-MM-DD (اختياري)
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'from must be YYYY-MM-DD' })
+  from?: string;
 
-  @IsOptional() @IsString()
-  to?: string = ''; // YYYY-MM-DD
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'to must be YYYY-MM-DD' })
+  to?: string;
 
-  @IsOptional() @IsString()
-  cursor?: string = '';
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
 
-  @IsOptional() @IsNumber()
-  @Transform(({ value }) => {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return 25;
-    return Math.max(1, Math.min(100, n));
-  })
-  limit: number = 25;
+  @IsOptional()
+  @IsString()
+  cursor?: string;
 
-  /** helpers */
+  // ===== خصائص مشتقة للاستعلام الرقمي الدقيق =====
   get isQDigitsOnly(): boolean {
-    const q = this.q || '';
-    if (!q) return false;
-    const digitsOnly = normalizeDigits(q).replace(/[^\d]/g, '');
-    return digitsOnly.length > 0 && digitsOnly === normalizeDigits(q).replace(/\s+/g, '');
+    const s = this.q?.trim();
+    return !!s && /^\d+$/.test(s);
   }
-  get qDigits(): string {
-    return normalizeDigits(this.q || '').replace(/[^\d]/g, '');
+
+  get qDigits(): string | null {
+    return this.isQDigitsOnly ? this.q!.trim() : null;
   }
 }
+
+export default ListOrdersDto;

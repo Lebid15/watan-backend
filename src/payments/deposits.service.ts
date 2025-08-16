@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, Brackets  } from 'typeorm';
+import { Repository, DataSource, Brackets } from 'typeorm';
 
 import { Deposit, DepositStatus } from './deposit.entity';
 import { PaymentMethod } from './payment-method.entity';
@@ -49,7 +49,7 @@ export class DepositsService {
     const rFrom = await this.getRate(originalCurrency);
     const rTo = await this.getRate(walletCurrency);
 
-    const ratio = rTo / rFrom; // كم يساوي 1 من العملة المرسلة بوحدة عملة المحفظة
+    const ratio = rTo / rFrom;
     const convertedAmount = Number(dto.originalAmount) * ratio;
 
     const entity = this.depositsRepo.create({
@@ -67,19 +67,101 @@ export class DepositsService {
     return this.depositsRepo.save(entity);
   }
 
-  /** المستخدم: طلباتي */
+  /** ✅ (توافق خلفي) مصفوفة بسيطة بدون باجينيشن */
   findMy(userId: string) {
     return this.depositsRepo.find({
       where: { user_id: userId } as any,
-      relations: { method: true }, // ✅ لعرض اسم الوسيلة بالشاشة
+      relations: { method: true },
       order: { createdAt: 'DESC' },
     });
   }
 
-  /** المشرف: جميع الطلبات */
+  /** ✅ جديد: المستخدم — باجينيشن cursor { items, pageInfo } */
+  async listMineWithPagination(
+    userId: string,
+    dto: { limit?: number; cursor?: string | null },
+  ) {
+    const limit = Math.max(1, Math.min(100, dto.limit ?? 20));
+    const cursor = decodeCursor(dto.cursor);
+
+    const qb = this.depositsRepo
+      .createQueryBuilder('d')
+      .leftJoinAndSelect('d.method', 'm')
+      .where('d.user_id = :uid', { uid: userId });
+
+    // Keyset: createdAt DESC, id DESC
+    if (cursor) {
+      qb.andWhere(new Brackets((b) => {
+        b.where('d.createdAt < :cts', { cts: new Date(cursor.ts) })
+         .orWhere(new Brackets((bb) => {
+           bb.where('d.createdAt = :cts', { cts: new Date(cursor.ts) })
+             .andWhere('d.id < :cid', { cid: cursor.id });
+         }));
+      }));
+    }
+
+    qb.orderBy('d.createdAt', 'DESC')
+      .addOrderBy('d.id', 'DESC')
+      .take(limit + 1);
+
+    const rows = await qb.getMany();
+    const hasMore = rows.length > limit;
+    const pageItems = hasMore ? rows.slice(0, limit) : rows;
+
+    const last = pageItems[pageItems.length - 1] || null;
+    const nextCursor = last
+      ? encodeCursor(toEpochMs((last as any).createdAt), String((last as any).id))
+      : null;
+
+    const items = pageItems.map((d) => {
+      const dx = d as any;
+
+      const originalAmount = Number(dx.originalAmount ?? dx.amount ?? 0);
+      const originalCurrency = String(dx.originalCurrency ?? dx.currency ?? 'USD');
+
+      const rateUsed = Number(dx.rateUsed ?? dx.fxRate ?? dx.rate ?? 1);
+
+      let convertedAmount = Number(dx.convertedAmount ?? dx.amountConverted ?? dx.amount_wallet ?? NaN);
+      if (!Number.isFinite(convertedAmount)) {
+        convertedAmount = Number((originalAmount || 0) * (rateUsed || 1));
+      }
+
+      const walletCurrency = String(dx.walletCurrency ?? dx.wallet_currency ?? 'TRY');
+
+      return {
+        id: dx.id,
+        method: dx.method
+          ? {
+              id: dx.method.id,
+              name: (dx.method as any).name ?? '',
+              type: (dx.method as any).type ?? undefined,
+              logoUrl: (dx.method as any).logoUrl ?? (dx.method as any).imageUrl ?? null,
+            }
+          : null,
+        originalAmount,
+        originalCurrency,
+        walletCurrency,
+        rateUsed,
+        convertedAmount,
+        note: dx.note ?? null,
+        status: dx.status,
+        createdAt: dx.createdAt,
+      };
+    });
+
+    return {
+      items,
+      pageInfo: { nextCursor, hasMore },
+      meta: {
+        limit,
+      },
+    };
+  }
+
+  /** المشرف: جميع الطلبات (بسيط) */
   findAllAdmin() {
     return this.depositsRepo.find({
-      relations: { user: true, method: true }, // ✅ لعرض المستخدم والوسيلة
+      relations: { user: true, method: true },
       order: { createdAt: 'DESC' },
     });
   }
@@ -87,7 +169,6 @@ export class DepositsService {
   /** المشرف: تغيير الحالة + شحن المحفظة عند الموافقة */
   async setStatus(id: string, newStatus: DepositStatus) {
     return this.dataSource.transaction(async (manager) => {
-      // نقرأ الطلب مع علاقاته لرسائل أوضح
       const dep = await manager.findOne(Deposit, {
         where: { id },
         relations: { user: true, method: true },
@@ -96,26 +177,22 @@ export class DepositsService {
 
       const oldStatus = dep.status;
 
-      // منع تعديل طلب موافَق مسبقًا (لتفادي شحن مزدوج)
       if (oldStatus === DepositStatus.APPROVED && newStatus !== DepositStatus.APPROVED) {
         throw new BadRequestException('لا يمكن تعديل طلب تمّت الموافقة عليه مسبقًا.');
       }
 
-      // احفظ الحالة الجديدة
       dep.status = newStatus;
       await manager.save(dep);
 
-      // عند الانتقال من pending -> approved: اشحن الرصيد + أرسل إشعار شحن
       if (oldStatus === DepositStatus.PENDING && newStatus === DepositStatus.APPROVED) {
         const user = await manager.findOne(User, { where: { id: dep.user_id } as any });
         if (!user) throw new NotFoundException('المستخدم غير موجود');
 
         const current = Number(user.balance ?? 0);
-        const add = Number(dep.convertedAmount ?? 0);
+        const add = Number((dep as any).convertedAmount ?? 0);
         user.balance = (current + add) as any;
         await manager.save(user);
 
-        // 🔔 إشعار موافقة إيداع واضح
         await this.notifications.depositApproved(
           dep.user_id,
           add,
@@ -124,12 +201,11 @@ export class DepositsService {
         );
       }
 
-      // عند الرفض: إشعار رفض واضح
       if (oldStatus !== DepositStatus.REJECTED && newStatus === DepositStatus.REJECTED) {
         await this.notifications.depositRejected(
           dep.user_id,
-          Number(dep.originalAmount ?? 0),
-          dep.originalCurrency,
+          Number((dep as any).originalAmount ?? 0),
+          (dep as any).originalCurrency,
           dep.method?.name ?? undefined,
           { depositId: dep.id }
         );
@@ -139,66 +215,47 @@ export class DepositsService {
     });
   }
 
-    async listDepositsWithPagination(dto: ListDepositsDto) {
+  /** المشرف: قائمة الإيداعات مع باجينيشن */
+  async listWithPagination(dto: ListDepositsDto) {
     const limit = Math.max(1, Math.min(100, dto.limit ?? 25));
     const cursor = decodeCursor(dto.cursor);
 
     const qb = this.depositsRepo
       .createQueryBuilder('d')
-      .leftJoin('d.user', 'u')
-      .addSelect(['u.username']) // ✅ بدلاً من fullname
-      .leftJoinAndSelect('d.method', 'm'); 
+      .leftJoinAndSelect('d.user', 'u')
+      .leftJoinAndSelect('d.method', 'm');
 
-    // فلاتر الحالة
-    if (dto.status) {
-      qb.andWhere('d.status = :status', { status: dto.status });
+    if (dto.status) qb.andWhere('d.status = :status', { status: dto.status });
+    if (dto.methodId) qb.andWhere('m.id = :mid', { mid: dto.methodId });
+    if (dto.from) qb.andWhere('d.createdAt >= :from', { from: new Date(dto.from + 'T00:00:00Z') });
+    if (dto.to) qb.andWhere('d.createdAt <= :to', { to: new Date(dto.to + 'T23:59:59Z') });
+
+    const qRaw = (dto.q || '').trim();
+    if (qRaw) {
+      const isDigits = /^\d+$/.test(qRaw);
+      if (isDigits) {
+        qb.andWhere('CAST(d.id AS TEXT) ILIKE :qexact', { qexact: qRaw });
+      } else {
+        const q = `%${qRaw.toLowerCase()}%`;
+        qb.andWhere(new Brackets((b) => {
+          b.where('LOWER(COALESCE(d.note, \'\')) LIKE :q', { q })
+           .orWhere('LOWER(COALESCE(u.username, \'\')) LIKE :q', { q })
+           .orWhere('LOWER(COALESCE(u.email, \'\')) LIKE :q', { q })
+           .orWhere('LOWER(COALESCE(m.name, \'\')) LIKE :q', { q });
+        }));
+      }
     }
 
-    // فلاتر طريقة الدفع
-    if (dto.methodId) {
-      qb.andWhere('d.methodId = :mid', { mid: dto.methodId });
-    }
-
-    // نطاق التاريخ
-    if (dto.from) {
-      qb.andWhere('d.createdAt >= :from', { from: new Date(dto.from + 'T00:00:00Z') });
-    }
-    if (dto.to) {
-      qb.andWhere('d.createdAt <= :to', { to: new Date(dto.to + 'T23:59:59Z') });
-    }
-
-    // البحث العام:
-    // - لو q أرقام فقط: طابق رقم الإيداع أو مرجع خارجي إن لديك حقلًا لذلك
-    if (dto.q && dto.isQDigitsOnly) {
-      const qd = dto.qDigits;
-      qb.andWhere(new Brackets(b => {
-        b.where('CAST(d.id AS TEXT) = :qd', { qd }); // إن كان id UUID، استبدل هذا بشرط مناسب لديك (مثلاً رقم تتّبُع)
-        // .orWhere('d.externalRef = :qd', { qd })   // مثـال لو لديك مرجع خارجي
-      }));
-    } else if (dto.q) {
-      // بحث نصي: اسم/بريد المستخدم أو ملاحظات الإيداع (حسب الحقول المتوفرة لديك)
-      // لتجنب JOIN ثقيل، استعمل حقل snapshot أو نفّذ JOIN محدودًا على المستخدم عند الحاجة.
-      qb.andWhere(new Brackets(b => {
-        b.where('LOWER(d.note) LIKE :q', { q: `%${dto.q}%` });
-        // .orWhere('LOWER(d.usernameSnapshot) LIKE :q', { q: `%${dto.q}%` });
-        // أو عبر JOIN على user:
-        // b.orWhere('LOWER(u.email) LIKE :q', { q: `%${dto.q}%` });
-        // b.orWhere('LOWER(u.username) LIKE :q', { q: `%${dto.q}%` });
-      }));
-    }
-
-    // Keyset cursor
     if (cursor) {
       qb.andWhere(new Brackets(b => {
         b.where('d.createdAt < :cts', { cts: new Date(cursor.ts) })
-        .orWhere(new Brackets(bb => {
-          bb.where('d.createdAt = :cts', { cts: new Date(cursor.ts) })
-            .andWhere('d.id < :cid', { cid: cursor.id });
-        }));
+         .orWhere(new Brackets(bb => {
+           bb.where('d.createdAt = :cts', { cts: new Date(cursor.ts) })
+             .andWhere('d.id < :cid', { cid: cursor.id });
+         }));
       }));
     }
 
-    // الفرز والتحديد
     qb.orderBy('d.createdAt', 'DESC')
       .addOrderBy('d.id', 'DESC')
       .take(limit + 1);
@@ -206,10 +263,51 @@ export class DepositsService {
     const rows = await qb.getMany();
 
     const hasMore = rows.length > limit;
-    const items = hasMore ? rows.slice(0, limit) : rows;
+    const pageItems = hasMore ? rows.slice(0, limit) : rows;
 
-    const last = items[items.length - 1] || null;
-    const nextCursor = last ? encodeCursor(toEpochMs(last.createdAt as any), String(last.id)) : null;
+    const last = pageItems[pageItems.length - 1] || null;
+    const nextCursor = last ? encodeCursor(toEpochMs((last as any).createdAt), String((last as any).id)) : null;
+
+    const items = pageItems.map((d) => {
+      const dx = d as any;
+      const originalAmount = Number(dx.originalAmount ?? dx.amount ?? 0);
+      const originalCurrency = String(dx.originalCurrency ?? dx.currency ?? 'USD');
+      const rateUsed = Number(dx.rateUsed ?? dx.fxRate ?? dx.rate ?? 1);
+
+      let convertedAmount = Number(dx.convertedAmount ?? dx.amountConverted ?? dx.amount_wallet ?? NaN);
+      if (!Number.isFinite(convertedAmount)) {
+        convertedAmount = Number((originalAmount || 0) * (rateUsed || 1));
+      }
+
+      const walletCurrency = String(dx.walletCurrency ?? dx.wallet_currency ?? 'TRY');
+
+      return {
+        id: dx.id,
+        user: dx.user
+          ? {
+              id: dx.user.id,
+              email: (dx.user as any).email ?? undefined,
+              fullName: (dx.user as any).fullName ?? undefined,
+              username: (dx.user as any).username ?? undefined,
+            }
+          : null,
+        method: dx.method
+          ? {
+              id: dx.method.id,
+              name: (dx.method as any).name ?? '',
+              type: (dx.method as any).type ?? undefined,
+            }
+          : null,
+        originalAmount,
+        originalCurrency,
+        rateUsed,
+        convertedAmount,
+        walletCurrency,
+        note: dx.note ?? null,
+        status: dx.status,
+        createdAt: dx.createdAt,
+      };
+    });
 
     return {
       items,
@@ -226,5 +324,4 @@ export class DepositsService {
       },
     };
   }
-
 }

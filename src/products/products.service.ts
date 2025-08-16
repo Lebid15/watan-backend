@@ -1042,6 +1042,7 @@ export class ProductsService {
     const qb = this.ordersRepo
       .createQueryBuilder('o')
       .leftJoinAndSelect('o.user', 'u')
+      .leftJoinAndSelect('u.currency', 'uc')
       .leftJoinAndSelect('o.package', 'pkg')
       .leftJoinAndSelect('o.product', 'prod');
 
@@ -1071,15 +1072,30 @@ export class ProductsService {
       });
     }
 
-    // البحث الرقمي (تطابق تام: orderNo / userIdentifier / externalOrderId)
-    if (dto.q && dto.isQDigitsOnly) {
-      const qd = dto.qDigits;
-      qb.andWhere(new Brackets((b) => {
-        b.where('CAST(o.orderNo AS TEXT) = :qd', { qd })
-          .orWhere('o.userIdentifier = :qd', { qd })
-          .orWhere('o.externalOrderId = :qd', { qd });
-      }));
+    const _q = (dto.q ?? '').trim();
+    if (_q) {
+      if (/^\d+$/.test(_q)) {
+        // كله أرقام: طابق حقول رقمية/نصية رقمية بتطابق تام
+        const qd = _q;
+        qb.andWhere(new Brackets((b) => {
+          b.where('CAST(o.orderNo AS TEXT) = :qd', { qd })
+            .orWhere('o.userIdentifier = :qd', { qd })
+            .orWhere('o.externalOrderId = :qd', { qd });
+        }));
+      } else {
+        // نص حر: ابحث في اسم المنتج/الباقة/المستخدم/الإيميل/المعرف/المرجع الخارجي
+        const q = `%${_q.toLowerCase()}%`;
+        qb.andWhere(new Brackets((b) => {
+          b.where('LOWER(prod.name) LIKE :q', { q })
+            .orWhere('LOWER(pkg.name) LIKE :q', { q })
+            .orWhere('LOWER(u.username) LIKE :q', { q })
+            .orWhere('LOWER(u.email) LIKE :q', { q })
+            .orWhere('LOWER(o.userIdentifier) LIKE :q', { q })
+            .orWhere('LOWER(o.externalOrderId) LIKE :q', { q });
+        }));
+      }
     }
+
 
     // Keyset cursor
     if (cursor) {
@@ -1177,89 +1193,110 @@ export class ProductsService {
       );
     }
 
-    const items = pageItems.map((o) => {
-      const priceUSD = Number((o as any).price || 0); // إجمالي بالدولار
-      const isExternal = !!(o.providerId && o.externalOrderId);
-      const providerType = o.providerId ? providerKind.get(o.providerId) : undefined;
+  const items = pageItems.map((o) => {
+    // إجمالي بالدولار المخزّن في الطلب
+    const priceUSD = Number((o as any).price || 0);
+    const unitPriceUSD = o.quantity ? priceUSD / Number(o.quantity) : priceUSD;
 
-      const frozen = frozenMap.get(o.id);
-      const isFrozen = !!(frozen && frozen.fxLocked && o.status === 'approved');
+    const isExternal = !!(o.providerId && o.externalOrderId);
+    const providerType = o.providerId ? providerKind.get(o.providerId) : undefined;
 
-      let sellTRY: number;
-      let costTRY: number;
-      let profitTRY: number;
+    const frozen = frozenMap.get(o.id);
+    const isFrozen = !!(frozen && frozen.fxLocked && o.status === 'approved');
 
-      if (isFrozen) {
-        sellTRY = Number((frozen!.sellTryAtApproval ?? 0).toFixed(2));
-        costTRY = Number((frozen!.costTryAtApproval ?? 0).toFixed(2));
-        const pf =
-          frozen!.profitTryAtApproval != null
-            ? Number(frozen!.profitTryAtApproval)
-            : sellTRY - costTRY;
-        profitTRY = Number(pf.toFixed(2));
+    let sellTRY: number;
+    let costTRY: number;
+    let profitTRY: number;
+
+    if (isFrozen) {
+      sellTRY = Number((frozen!.sellTryAtApproval ?? 0).toFixed(2));
+      costTRY = Number((frozen!.costTryAtApproval ?? 0).toFixed(2));
+      const pf =
+        frozen!.profitTryAtApproval != null
+          ? Number(frozen!.profitTryAtApproval)
+          : sellTRY - costTRY;
+      profitTRY = Number(pf.toFixed(2));
+    } else {
+      // التكلفة
+      if (isExternal) {
+        const amt = Math.abs(Number((o as any).costAmount ?? 0));
+        let cur = String((o as any).costCurrency || '').toUpperCase().trim();
+        if (providerType === 'znet') cur = 'TRY';
+        if (!cur) cur = 'USD';
+        costTRY = toTRY(amt, cur);
       } else {
-        // التكلفة
-        if (isExternal) {
-          const amt = Math.abs(Number((o as any).costAmount ?? 0));
-          let cur = String((o as any).costCurrency || '').toUpperCase().trim();
-          if (providerType === 'znet') cur = 'TRY';
-          if (!cur) cur = 'USD';
-          costTRY = toTRY(amt, cur);
-        } else {
-          const baseUSD = Number(
-            ((o as any).package?.basePrice ?? (o as any).package?.capital ?? 0),
-          );
-          const qty = Number(o.quantity ?? 1);
-          costTRY = baseUSD * qty * TRY_RATE;
-        }
-
-        // البيع والربح
-        sellTRY = priceUSD * TRY_RATE;
-        profitTRY = sellTRY - costTRY;
-
-        // تقريب
-        sellTRY = Number(sellTRY.toFixed(2));
-        costTRY = Number(costTRY.toFixed(2));
-        profitTRY = Number(profitTRY.toFixed(2));
+        const baseUSD = Number(
+          ((o as any).package?.basePrice ?? (o as any).package?.capital ?? 0),
+        );
+        const qty = Number(o.quantity ?? 1);
+        costTRY = baseUSD * qty * TRY_RATE;
       }
 
-      const username = (o as any).user?.username ?? null;
-      const userEmail = (o as any).user?.email ?? null;
+      // البيع والربح
+      sellTRY = priceUSD * TRY_RATE;
+      profitTRY = sellTRY - costTRY;
 
-      return {
-        id: o.id,
-        orderNo: (o as any).orderNo ?? null,
-        status: o.status,
-        createdAt: o.createdAt?.toISOString?.() ?? new Date(o.createdAt as any).toISOString(),
+      // تقريب
+      sellTRY = Number(sellTRY.toFixed(2));
+      costTRY = Number(costTRY.toFixed(2));
+      profitTRY = Number(profitTRY.toFixed(2));
+    }
 
-        username,
-        userEmail,
+    // ✅ تسعير العرض بعملة المستخدم
+    const userRate = (o as any).user?.currency ? Number((o as any).user.currency.rate) : 1;
+    const userCode = (o as any).user?.currency ? (o as any).user.currency.code : 'USD';
+    const totalUser = priceUSD * userRate;
+    const unitUser  = unitPriceUSD * userRate;
 
-        providerId: o.providerId ?? null,
-        externalOrderId: o.externalOrderId ?? null,
-        userIdentifier: o.userIdentifier ?? null,
+    const username = (o as any).user?.username ?? null;
+    const userEmail = (o as any).user?.email ?? null;
 
-        currencyTRY: 'TRY',
-        sellTRY,
-        costTRY,
-        profitTRY,
+    return {
+      id: o.id,
+      orderNo: (o as any).orderNo ?? null,
+      status: o.status,
+      createdAt: o.createdAt?.toISOString?.() ?? new Date(o.createdAt as any).toISOString(),
+      username,
+      userEmail,
 
-        product: o.product
-          ? { id: o.product.id, name: o.product.name, imageUrl: pickImage(o.product) }
-          : null,
-        package: o.package
-          ? { id: o.package.id, name: o.package.name, imageUrl: pickImage(o.package) }
-          : null,
+      providerId: o.providerId ?? null,
+      externalOrderId: o.externalOrderId ?? null,
+      userIdentifier: o.userIdentifier ?? null,
 
-        sentAt: (o as any).sentAt ? (o as any).sentAt.toISOString?.() ?? null : null,
-        completedAt: (o as any).completedAt
-          ? (o as any).completedAt.toISOString?.() ?? null
-          : null,
+      quantity: o.quantity,
 
-        fxLocked: isFrozen,
-        approvedLocalDate: frozen?.approvedLocalDate ?? null,
-      };
-    });
+      // ✅ حقول التسعير التي يحتاجها الفرونت
+      priceUSD,
+      unitPriceUSD,
+      display: {
+        currencyCode: userCode,
+        unitPrice: unitUser,
+        totalPrice: totalUser,
+      },
+
+      // حقول TRY للوحة الأدمن/التقارير
+      currencyTRY: 'TRY',
+      sellTRY,
+      costTRY,
+      profitTRY,
+
+      product: o.product
+        ? { id: o.product.id, name: o.product.name, imageUrl: pickImage(o.product) }
+        : null,
+      package: o.package
+        ? { id: o.package.id, name: o.package.name, imageUrl: pickImage(o.package) }
+        : null,
+
+      sentAt: (o as any).sentAt ? (o as any).sentAt.toISOString?.() ?? null : null,
+      completedAt: (o as any).completedAt
+        ? (o as any).completedAt.toISOString?.() ?? null
+        : null,
+
+      fxLocked: isFrozen,
+      approvedLocalDate: frozen?.approvedLocalDate ?? null,
+    };
+  });
+
 
     return {
       items,
@@ -1323,23 +1360,26 @@ export class ProductsService {
     if (dto.from) qb.andWhere('o.createdAt >= :from', { from: new Date(dto.from + 'T00:00:00Z') });
     if (dto.to)   qb.andWhere('o.createdAt <= :to',   { to:   new Date(dto.to   + 'T23:59:59Z') });
 
-    if (dto.q && dto.isQDigitsOnly) {
-      const qd = dto.qDigits;
+    const _q = (dto.q ?? '').trim();
+    if (_q && /^\d+$/.test(_q)) {
+      const qd = _q;
       qb.andWhere(new Brackets(b => {
         b.where('CAST(o.orderNo AS TEXT) = :qd', { qd })
         .orWhere('o.userIdentifier = :qd', { qd })
         .orWhere('o.externalOrderId = :qd', { qd });
       }));
-    } else if (dto.q) {
-      const q = `%${(dto.q || '').trim().toLowerCase()}%`;
+    } else if (_q) {
+      const q = `%${_q.toLowerCase()}%`;
       qb.andWhere(new Brackets(b => {
         b.where('LOWER(prod.name) LIKE :q', { q })
         .orWhere('LOWER(pkg.name) LIKE :q', { q })
         .orWhere('LOWER(u.username) LIKE :q', { q })
         .orWhere('LOWER(u.email) LIKE :q', { q })
+        .orWhere('LOWER(o.userIdentifier) LIKE :q', { q })
         .orWhere('LOWER(o.externalOrderId) LIKE :q', { q });
       }));
     }
+
 
     if (cursor) {
       qb.andWhere(new Brackets(b => {

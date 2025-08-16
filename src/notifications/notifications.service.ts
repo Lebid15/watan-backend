@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository, In, Brackets } from 'typeorm';
 import { Notification, NotificationType } from './notification.entity';
 import { User } from '../user/user.entity';
+import { decodeCursor, encodeCursor, toEpochMs } from '../utils/pagination';
 
 @Injectable()
 export class NotificationsService {
@@ -82,9 +83,71 @@ export class NotificationsService {
     });
   }
 
-  async markAsRead(notificationId: string): Promise<Notification> {
-    const notification = await this.notificationsRepo.findOne({ where: { id: notificationId } });
+  /** واجهة مع باجينيشن (keyset) — متوافقة مع /notifications و /notifications/mine */
+  async listMineWithPagination(
+    userId: string,
+    dto: { limit?: number; cursor?: string | null },
+  ) {
+    const limit = Math.max(1, Math.min(100, Number(dto?.limit ?? 20)));
+    const cursor = decodeCursor(dto?.cursor);
+
+    const qb = this.notificationsRepo
+      .createQueryBuilder('n')
+      .where('n.user_id = :uid', { uid: userId });
+
+    if (cursor) {
+      qb.andWhere(new Brackets((b) => {
+        b.where('n.createdAt < :cts', { cts: new Date(cursor.ts) })
+         .orWhere(new Brackets(bb => {
+            bb.where('n.createdAt = :cts', { cts: new Date(cursor.ts) })
+              .andWhere('n.id < :cid', { cid: cursor.id });
+         }));
+      }));
+    }
+
+    qb.orderBy('n.createdAt', 'DESC')
+      .addOrderBy('n.id', 'DESC')
+      .take(limit + 1);
+
+    const rows = await qb.getMany();
+    const hasMore = rows.length > limit;
+    const pageItems = hasMore ? rows.slice(0, limit) : rows;
+
+    const last = pageItems[pageItems.length - 1] || null;
+    const nextCursor = last
+      ? encodeCursor(toEpochMs((last as any).createdAt), String((last as any).id))
+      : null;
+
+    // نعيد العناصر كما هي (الفرونت يقرأ الحقول التالية)
+    const items = pageItems.map((n) => ({
+      id: n.id,
+      title: n.title ?? null,
+      message: n.message,
+      link: n.link ?? null,
+      isRead: n.isRead ?? false,
+      createdAt: (n as any).createdAt?.toISOString?.() ?? new Date(n.createdAt as any).toISOString(),
+    }));
+
+    return {
+      items,
+      pageInfo: { nextCursor, hasMore },
+      meta: { limit },
+    };
+  }
+
+  /** يدعم تمرير userId اختياريًا للتحقق من الملكية دون كسر التوافق */
+  async markAsRead(notificationId: string, userId?: string): Promise<Notification> {
+    const notification = await this.notificationsRepo.findOne({
+      where: { id: notificationId },
+      relations: ['user'],
+    });
     if (!notification) throw new NotFoundException(`التنبيه ${notificationId} غير موجود`);
+
+    if (userId && notification.user?.id && notification.user.id !== userId) {
+      // حماية إضافية اختيارية
+      throw new ForbiddenException('لا تملك صلاحية تعديل هذا التنبيه');
+    }
+
     if (!notification.isRead) {
       notification.isRead = true;
       notification.readAt = new Date();

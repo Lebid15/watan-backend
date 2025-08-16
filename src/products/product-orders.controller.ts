@@ -15,7 +15,8 @@ import { ProductsService } from './products.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
-import { UserRole } from '../user/dto/update-user.dto';
+import { UserRole } from '../auth/user-role.enum';
+import { ListOrdersDto } from './dto/list-orders.dto';
 
 export type OrderStatus = 'pending' | 'approved' | 'rejected';
 
@@ -58,39 +59,49 @@ export class ProductOrdersController {
     };
   }
 
-  /** طلبات المستخدم الحالي فقط */
+  /** طلبات المستخدم الحالي — الآن مع pagination (items + pageInfo) */
   @Get('me')
-  async getMyOrders(@Req() req: Request) {
+  async getMyOrders(@Req() req: Request, @Query() query: ListOrdersDto) {
     const user = req.user as any;
-    // لا نرمي NotFound لو فاضي — نرجّع مصفوفة فاضية
-    return this.productsService.getUserOrders(user.id);
+    // نمرر userId للدالة المبنية على keyset cursor
+    return this.productsService.listOrdersWithPagination({
+      ...query,
+      // @ts-ignore: نضيف خاصية مؤقتة تقرأها service
+      userId: user.id,
+    } as any);
   }
 
-  /** (اختياري) طلبات مستخدم محدد — للأدمن فقط */
+  /** (اختياري) طلبات مستخدم محدد — للأدمن فقط — مع pagination */
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
   @Get('user/:userId')
-  async getUserOrdersAdmin(@Param('userId') userId: string) {
-    return this.productsService.getUserOrders(userId);
+  async getUserOrdersAdmin(
+    @Param('userId') userId: string,
+    @Query() query: ListOrdersDto
+  ) {
+    return this.productsService.listOrdersWithPagination({
+      ...query,
+      // @ts-ignore
+      userId,
+    } as any);
   }
 
-  /** كل الطلبات — للأدمن فقط */
+  /** كل الطلبات — للأدمن فقط — مع pagination */
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
   @Get()
-  async getAllOrders(@Query('status') status?: string) {
-    const valid: OrderStatus[] = ['pending', 'approved', 'rejected'];
-    const statusTyped = valid.includes(status as OrderStatus)
-      ? (status as OrderStatus)
-      : undefined;
-
-    return this.productsService.getAllOrders(statusTyped);
+  async getAllOrders(@Query() query: ListOrdersDto) {
+    // ترجع { items, pageInfo: { nextCursor, hasMore }, meta }
+    return this.productsService.listOrdersForAdmin(query);
   }
 
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
   @Patch(':id/status')
-  async setStatus(@Param('id') id: string, @Body('status') status: 'approved' | 'rejected') {
+  async setStatus(
+    @Param('id') id: string,
+    @Body('status') status: 'approved' | 'rejected'
+  ) {
     const updated = await this.productsService.updateOrderStatus(id, status);
     return { ok: true, id, status: updated?.status ?? status };
   }
