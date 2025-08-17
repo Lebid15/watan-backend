@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import * as dotenv from 'dotenv';
+import 'dotenv/config';
 
 dotenv.config({ path: process.env.NODE_ENV === 'production' ? '.env' : '.env.local' });
 const isProd = process.env.NODE_ENV === 'production';

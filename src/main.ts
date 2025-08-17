@@ -1,3 +1,23 @@
+// backend/src/main.ts
+// ✅ حمّل .env.local أولاً إن وجد، وإلا .env
+import * as fs from 'fs';
+import * as path from 'path';
+import * as dotenv from 'dotenv';
+
+(() => {
+  const root = process.cwd(); // مجلد backend عند التشغيل
+  const envLocal = path.resolve(root, '.env.local');
+  const env = path.resolve(root, '.env');
+
+  if (fs.existsSync(envLocal)) {
+    dotenv.config({ path: envLocal });
+    console.log('🟢 Loaded env from .env.local');
+  } else {
+    dotenv.config({ path: env });
+    console.log('🟡 Loaded env from .env');
+  }
+})();
+
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
@@ -7,16 +27,16 @@ import { DataSource } from 'typeorm';
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
-  // ✅ تفعيل CORS للتطوير والإنتاج
+  // CORS
   app.enableCors({
-    origin: process.env.CORS_ORIGIN || '*', // السماح بأي دومين عند عدم تحديد بيئة
+    origin: process.env.CORS_ORIGIN || '*',
     credentials: true,
   });
 
-  // ✅ إضافة /api لكل المسارات
+  // /api prefix
   app.setGlobalPrefix('api');
 
-  // ✅ إعداد Swagger
+  // Swagger
   const config = new DocumentBuilder()
     .setTitle('Watan API')
     .setDescription('API documentation for Watan project')
@@ -32,37 +52,42 @@ async function bootstrap() {
       'JWT-auth',
     )
     .build();
-
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
 
-  // ✅ استخدم PORT من البيئة أو 3001 محليًا
-  const port = process.env.PORT || 3001;
-  await app.listen(port, '0.0.0.0');
+  const port = Number(process.env.PORT) || 3001;
+  const host = process.env.HOST || '0.0.0.0';
+  await app.listen(port, host);
 
-  // ✅ اختبار الاتصال بقاعدة البيانات
+  // اختبار اتصال DB
   const dataSource = app.get(DataSource);
   try {
     await dataSource.query('SELECT NOW()');
-  } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
+    console.log('✅ Database connected:', {
+      host: process.env.DB_HOST,
+      db: process.env.DB_NAME,
+      user: process.env.DB_USERNAME,
+    });
+  } catch (error: any) {
+    console.error('❌ Database connection failed:', error?.message || error);
   }
 
-  // ✅ طباعة جميع المسارات الموجودة بعد إضافة /api
+  // طباعة المسارات
   const httpAdapter = app.getHttpAdapter();
   const instance: any = httpAdapter.getInstance();
-  const router = instance._router;
-
+  const router = instance?._router;
   if (router?.stack) {
     const availableRoutes = router.stack
-      .filter((layer) => layer.route)
-      .map((layer) => ({
-        method: Object.keys(layer.route.methods)[0].toUpperCase(),
+      .filter((layer: any) => layer.route)
+      .map((layer: any) => ({
+        method: Object.keys(layer.route.methods)[0]?.toUpperCase() || 'GET',
         path: '/api' + layer.route.path,
       }));
-
     console.table(availableRoutes);
   }
+
+  console.log(`🚀 API running on http://${host}:${port}/api`);
+  console.log(`📘 Swagger at        http://${host}:${port}/api/docs`);
 }
 
 bootstrap();

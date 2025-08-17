@@ -13,10 +13,11 @@ export class PriceGroup {
   @Column({ default: true })
   isActive: boolean;
 
-  @OneToMany(() => PackagePrice, (price) => price.priceGroup)
+  // 🔹 العلاقة مع أسعار الباقات
+  @OneToMany(() => PackagePrice, (pp) => pp.priceGroup, { cascade: true })
   prices: PackagePrice[];
 
-  // ✅ إضافة العلاقة مع المستخدمين لاحتساب usersCount
+  // ✅ العلاقة مع المستخدمين لاحتساب usersCount
   @OneToMany(() => User, (user) => user.priceGroup)
   users: User[];
 }
