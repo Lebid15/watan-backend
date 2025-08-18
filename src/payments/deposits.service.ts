@@ -166,55 +166,78 @@ export class DepositsService {
     });
   }
 
-  /** المشرف: تغيير الحالة + شحن المحفظة عند الموافقة */
+  /**
+   * المشرف: تغيير الحالة مع عكس أثر الرصيد عند التحويل بين (approved/rejected)
+   * القواعد:
+   * - pending -> approved: شحن الرصيد بقيمة convertedAmount
+   * - pending -> rejected: لا شيء
+   * - rejected -> approved: شحن الرصيد بقيمة convertedAmount
+   * - approved -> rejected: خصم نفس قيمة convertedAmount
+   * - أي انتقال إلى pending بعد قرار نهائي: غير مسموح
+   * - نفس الحالة: لا شيء
+   */
+/** تغيير الحالة مع تعديل الرصيد، بلا أقفال صريحة وبلا انتظار إشعارات */
   async setStatus(id: string, newStatus: DepositStatus) {
     return this.dataSource.transaction(async (manager) => {
-      const dep = await manager.findOne(Deposit, {
-        where: { id },
-        relations: { user: true, method: true },
-      });
+      // 1) اجلب الإيداع (بدون FOR UPDATE)
+      const dep = await manager.findOne(Deposit, { where: { id } as any });
       if (!dep) throw new NotFoundException('طلب الإيداع غير موجود');
 
       const oldStatus = dep.status;
+      if (newStatus === oldStatus) return dep;
 
-      if (oldStatus === DepositStatus.APPROVED && newStatus !== DepositStatus.APPROVED) {
-        throw new BadRequestException('لا يمكن تعديل طلب تمّت الموافقة عليه مسبقًا.');
+      if (newStatus === DepositStatus.PENDING && oldStatus !== DepositStatus.PENDING) {
+        throw new BadRequestException('لا يمكن إعادة الحالة إلى قيد المراجعة بعد اتخاذ القرار.');
       }
 
+      // 2) احسب delta
+      const amount = Number((dep as any).convertedAmount ?? 0);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new BadRequestException('قيمة التحويل غير صالحة لهذا الإيداع.');
+      }
+
+      let delta = 0;
+      if (newStatus === DepositStatus.APPROVED && oldStatus !== DepositStatus.APPROVED) {
+        // pending/rejected -> approved
+        delta = amount;
+      } else if (oldStatus === DepositStatus.APPROVED && newStatus !== DepositStatus.APPROVED) {
+        // approved -> rejected
+        delta = -amount;
+      }
+
+      // 3) طبّق التعديل على الرصيد بعملية increment مباشرة (تجنّب قفل يدوي)
+      if (delta !== 0) {
+        // تقليم لخانتين لأن balance = DECIMAL(12,2)
+        const deltaRounded = Number((Math.round(delta * 100) / 100).toFixed(2));
+        await manager
+          .createQueryBuilder()
+          .update(User)
+          .set({ balance: () => `ROUND(COALESCE(balance,0) + (${deltaRounded}), 2)` })
+          .where('id = :uid', { uid: dep.user_id })
+          .execute();
+      }
+
+      // 4) حدّث حالة الإيداع واحفظ
       dep.status = newStatus;
       await manager.save(dep);
 
-      if (oldStatus === DepositStatus.PENDING && newStatus === DepositStatus.APPROVED) {
-        const user = await manager.findOne(User, { where: { id: dep.user_id } as any });
-        if (!user) throw new NotFoundException('المستخدم غير موجود');
-
-        const current = Number(user.balance ?? 0);
-        const add = Number((dep as any).convertedAmount ?? 0);
-        user.balance = (current + add) as any;
-        await manager.save(user);
-
-        await this.notifications.depositApproved(
-          dep.user_id,
-          add,
-          dep.method?.name ?? undefined,
-          { depositId: dep.id }
-        );
-      }
-
-      if (oldStatus !== DepositStatus.REJECTED && newStatus === DepositStatus.REJECTED) {
-        await this.notifications.depositRejected(
-          dep.user_id,
-          Number((dep as any).originalAmount ?? 0),
-          (dep as any).originalCurrency,
-          dep.method?.name ?? undefined,
-          { depositId: dep.id }
-        );
-      }
+      // 5) أرسل الإشعارات "Fire-and-forget" بعد نجاح الترنزكشن — لا تنتظرها
+      setImmediate(() => {
+        try {
+          if (newStatus === DepositStatus.APPROVED) {
+            void this.notifications.depositApproved(dep.user_id, amount, undefined, { depositId: dep.id });
+          } else if (newStatus === DepositStatus.REJECTED) {
+            const origAmt = Number((dep as any).originalAmount ?? 0);
+            const origCur = (dep as any).originalCurrency;
+            void this.notifications.depositRejected(dep.user_id, origAmt, origCur, undefined, { depositId: dep.id });
+          }
+        } catch { /* تجاهل أي فشل بالإشعار */ }
+      });
 
       return dep;
     });
   }
-
+  
   /** المشرف: قائمة الإيداعات مع باجينيشن */
   async listWithPagination(dto: ListDepositsDto) {
     const limit = Math.max(1, Math.min(100, dto.limit ?? 25));

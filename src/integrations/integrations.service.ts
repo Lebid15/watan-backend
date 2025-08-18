@@ -14,6 +14,8 @@ import { Product } from '../products/product.entity';
 import { ProductPackage } from '../products/product-package.entity';
 import { PackageRouting } from './package-routing.entity';
 import { PackageCost } from './package-cost.entity';
+import { CodeGroup } from '../codes/entities/code-group.entity';
+import { CodeItem } from '../codes/entities/code-item.entity';
 
 @Injectable()
 export class IntegrationsService {
@@ -38,6 +40,11 @@ export class IntegrationsService {
 
     @InjectRepository(PackageCost)
     private readonly costRepo: Repository<PackageCost>,
+
+    @InjectRepository(CodeGroup)
+    private readonly codeGroupRepo: Repository<CodeGroup>,
+    @InjectRepository(CodeItem)
+    private readonly codeItemRepo: Repository<CodeItem>,
   ) {}
 
   // ===== CRUD للتكاملات =====
@@ -165,13 +172,14 @@ export class IntegrationsService {
   }
 
   // ===== جديد: توجيه الباقات (عام) =====
-
-  /** جميع الباقات مع إعدادات التوجيه والتكاليف المتاحة */
   async getRoutingAll(q?: string) {
-    // جميع المزوّدين لعرضهم في القوائم
+    // 1) جميع المزوّدين (للـ dropdown)
     const providers = await this.integrationRepo.find({ order: { name: 'ASC' } as any });
 
-    // الباقات + المنتج + routing + تكاليف
+    // ⚠️ الصحيح: codeGroupRepo (مفرد)
+    const groups = await this.codeGroupRepo.find({ order: { name: 'ASC' } as any });
+
+    // 2) الباقات + المنتج + الأسعار
     const qb = this.packageRepo
       .createQueryBuilder('pkg')
       .leftJoinAndSelect('pkg.product', 'product')
@@ -180,16 +188,16 @@ export class IntegrationsService {
 
     if (q && q.trim()) {
       qb.andWhere(
-        `(LOWER(pkg.name) LIKE LOWER(:q) OR LOWER(product.name) LIKE LOWER(:q))`,
+        '(LOWER(pkg.name) LIKE LOWER(:q) OR LOWER(product.name) LIKE LOWER(:q))',
         { q: `%${q.trim()}%` },
       );
     }
 
     qb.orderBy('product.name', 'ASC').addOrderBy('pkg.name', 'ASC');
     const pkgs = await qb.getMany();
-
     const pkgIds = pkgs.map((p) => p.id);
 
+    // 3) إعدادات التوجيه + التكاليف
     const routingRows = pkgIds.length
       ? await this.routingRepo.find({
           where: { package: { id: In(pkgIds) } as any },
@@ -204,11 +212,25 @@ export class IntegrationsService {
         })
       : [];
 
-    // تجميع سريع للتكاليف حسب (packageId+providerId)
     const costKey = (pkgId: string, providerId: string) => `${pkgId}::${providerId}`;
     const costsMap = new Map<string, PackageCost>();
     costRows.forEach((c) => costsMap.set(costKey(c.package.id, c.providerId), c));
 
+    // 4) عدد الأكواد المتاحة بكل مجموعة
+    const groupIds = groups.map((g) => g.id);
+    let availableByGroup = new Map<string, number>();
+    if (groupIds.length) {
+      const rows = await this.codeItemRepo
+        .createQueryBuilder('ci')
+        .select('ci.groupId', 'groupId')
+        .addSelect('COUNT(*) FILTER (WHERE ci.status = :st)', 'available')
+        .where('ci.groupId IN (:...ids)', { ids: groupIds, st: 'available' })
+        .groupBy('ci.groupId')
+        .getRawMany();
+      availableByGroup = new Map(rows.map((r: any) => [String(r.groupId), Number(r.available || 0)]));
+    }
+
+    // 5) بناء العناصر
     const items = pkgs.map((p) => {
       const routing = routingRows.find((r) => r.package.id === p.id);
       const basePrice = Number(p.basePrice ?? 0);
@@ -233,21 +255,25 @@ export class IntegrationsService {
           mode: routing?.mode ?? 'manual',
           primaryProviderId: routing?.primaryProviderId ?? null,
           fallbackProviderId: routing?.fallbackProviderId ?? null,
+          providerType: routing?.providerType ?? 'manual',   // ← جديد
+          codeGroupId: routing?.codeGroupId ?? null,         // ← جديد
         },
         providers: providerCosts,
       };
     });
 
+    // ✅ هذا هو مكان الـ return الذي سألت عنه
     return {
       providers: providers.map((p) => ({ id: p.id, name: p.name, type: p.provider })),
+      codeGroups: groups.map((g) => ({
+        id: g.id,
+        name: g.name,
+        available: availableByGroup.get(g.id) ?? 0,
+      })),
       items,
     };
   }
 
-  /** حفظ فوري لحقل routing: primary|fallback.
-   *  - إذا كان providerId=null => Manual
-   *  - إذا يوجد أي مزوّد مختار => mode=auto وإلا manual
-   */
   async setRoutingField(
     packageId: string,
     which: 'primary' | 'fallback',
@@ -394,6 +420,97 @@ export class IntegrationsService {
     const cfg = await this.get(id);
     Object.assign(cfg, dto);
     return this.integrationRepo.save(cfg);
+  }
+
+  async setRoutingProviderType(packageId: string, providerType: 'manual'|'external'|'internal_codes') {
+  const pkg = await this.packageRepo.findOne({ where: { id: packageId } });
+  if (!pkg) throw new NotFoundException('Package not found');
+
+  let row = await this.routingRepo.findOne({ where: { package: { id: pkg.id } as any }, relations: ['package'] });
+  if (!row) row = this.routingRepo.create({ package: pkg, mode: 'manual' as any });
+
+  row.providerType = providerType as any;
+
+  // عند التحويل لـ manual ننظّف المزوّدين
+  if (providerType === 'manual') {
+    row.mode = 'manual' as any;
+    row.primaryProviderId = null;
+    row.fallbackProviderId = null;
+    row.codeGroupId = null;
+  }
+
+  await this.routingRepo.save(row);
+  return { packageId, routing: {
+    mode: row.mode,
+    providerType: row.providerType,
+    primaryProviderId: row.primaryProviderId,
+    fallbackProviderId: row.fallbackProviderId,
+    codeGroupId: row.codeGroupId ?? null,
+  }};
+}
+
+  async setRoutingType(packageId: string, providerType: 'manual' | 'external' | 'internal_codes') {
+    const pkg = await this.packageRepo.findOne({ where: { id: packageId } });
+    if (!pkg) throw new NotFoundException('Package not found');
+
+    let row = await this.routingRepo.findOne({ where: { package: { id: packageId } as any }, relations: ['package'] });
+    if (!row) row = this.routingRepo.create({ package: pkg, mode: 'manual' as any });
+
+    row.providerType = providerType as any;
+
+    // لو اخترنا internal_codes ولم تُحدد مجموعة بعد، أبقي mode=manual مؤقتًا
+    if (providerType === 'internal_codes') {
+      row.primaryProviderId = null;
+      row.fallbackProviderId = null;
+      row.mode = row.codeGroupId ? ('auto' as any) : ('manual' as any);
+    } else if (providerType === 'manual') {
+      row.primaryProviderId = null;
+      row.fallbackProviderId = null;
+      row.codeGroupId = null;
+      row.mode = 'manual' as any;
+    } else {
+      // external
+      row.mode = (row.primaryProviderId || row.fallbackProviderId) ? ('auto' as any) : ('manual' as any);
+      row.codeGroupId = null;
+    }
+
+    await this.routingRepo.save(row);
+    return {
+      packageId,
+      routing: {
+        mode: row.mode,
+        providerType: row.providerType,
+        primaryProviderId: row.primaryProviderId,
+        fallbackProviderId: row.fallbackProviderId,
+        codeGroupId: row.codeGroupId ?? null,
+      },
+    };
+  }
+
+  async setRoutingCodeGroup(packageId: string, codeGroupId: string | null) {
+    const pkg = await this.packageRepo.findOne({ where: { id: packageId } });
+    if (!pkg) throw new NotFoundException('Package not found');
+
+    let row = await this.routingRepo.findOne({ where: { package: { id: packageId } as any }, relations: ['package'] });
+    if (!row) row = this.routingRepo.create({ package: pkg, mode: 'manual' as any });
+
+    row.providerType = 'internal_codes' as any;
+    row.codeGroupId = codeGroupId;
+    row.primaryProviderId = null;
+    row.fallbackProviderId = null;
+    row.mode = codeGroupId ? ('auto' as any) : ('manual' as any);
+
+    await this.routingRepo.save(row);
+    return {
+      packageId,
+      routing: {
+        mode: row.mode,
+        providerType: row.providerType,
+        codeGroupId: row.codeGroupId,
+        primaryProviderId: null,
+        fallbackProviderId: null,
+      },
+    };
   }
 
 }

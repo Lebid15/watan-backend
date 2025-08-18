@@ -99,4 +99,15 @@ export class IntegrationsController {
   refreshProviderCost(@Body() body: { packageId: string; providerId: string }) {
     return this.svc.refreshProviderCost(body.packageId, body.providerId);
   }
+
+  @Post('routing/set-type')
+  setRoutingType(@Body() body: { packageId: string; providerType: 'manual' | 'external' | 'internal_codes' }) {
+    return this.svc.setRoutingType(body.packageId, body.providerType);
+  }
+
+  @Post('routing/set-code-group')
+  setRoutingCodeGroup(@Body() body: { packageId: string; codeGroupId: string | null }) {
+    return this.svc.setRoutingCodeGroup(body.packageId, body.codeGroupId);
+  }
+
 }

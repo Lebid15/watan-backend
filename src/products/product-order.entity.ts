@@ -1,3 +1,4 @@
+// src/products/product-order.entity.ts
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -19,6 +20,12 @@ export type ExternalOrderStatus =
   | 'processing'
   | 'done'
   | 'failed';
+
+export type OrderNote = {
+  by: 'admin' | 'system' | 'user';
+  text: string;
+  at: string; // ISO datetime string
+};
 
 @Entity('product_orders')
 export class ProductOrder {
@@ -73,6 +80,10 @@ export class ProductOrder {
   @Column({ type: 'varchar', nullable: true })
   userIdentifier?: string | null;
 
+  /** 🔹 الحقل الإضافي (مثل كلمة المرور أو أي قيمة إضافية) */
+  @Column({ type: 'varchar', nullable: true })
+  extraField?: string | null;
+
   /** ربط خارجي */
   @Column({ type: 'varchar', nullable: true })
   providerId?: string | null;
@@ -90,9 +101,17 @@ export class ProductOrder {
   @Column({ type: 'varchar', length: 250, nullable: true })
   lastMessage?: string | null;
 
-  /** ملاحظات المشرف */
+  /** ملاحظات المشرف (حقل واحد سريع) */
   @Column({ type: 'text', nullable: true })
   manualNote?: string | null;
+
+  /** ✅ سجل ملاحظات (مشرف/نظام/مستخدم) — افتراضيًا مصفوفة فاضية */
+  @Column({ type: 'jsonb', default: () => `'[]'` })
+  notes!: OrderNote[];
+
+  /** ✅ كود الـ PIN من المزود إن توفر */
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  pinCode?: string | null;
 
   /** أزمنة التنفيذ */
   @Column({ type: 'timestamptz', nullable: true })
@@ -144,4 +163,12 @@ export class ProductOrder {
 
   @CreateDateColumn()
   createdAt: Date;
+
+   /** ✅ رسالة/ملاحظة من المزوّد */
+  @Column({ type: 'text', nullable: true })
+  providerMessage?: string | null;
+
+  /** ✅ عداد الملاحظات (يمكن تحدّثه عند كل إضافة) */
+  @Column({ type: 'int', default: 0 })
+  notesCount?: number;
 }

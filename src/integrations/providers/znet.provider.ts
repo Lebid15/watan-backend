@@ -74,6 +74,8 @@ export class ZnetProvider implements ProviderDriver {
     price?: number;
     raw: any;
     costCurrency?: string;
+    /** ملاحظة اختيارية إن أعادها المزود في pin_ekle (نادراً) */
+    note?: string;
   }> {
     const base = this.baseUrl(cfg);
     const auth = this.authQuery(cfg);
@@ -105,25 +107,39 @@ export class ZnetProvider implements ProviderDriver {
       };
     }
 
-    // --------- الأهم: تحويل userIdentifier إلى oyuncu_bilgi ----------
-    // نقبل عدة أسماء محتملة قادمة من الـ payload
-    const oyuncu_bilgi =
+    // --------- التقاط oyuncu_bilgi والحقل الإضافي ----------
+    let oyuncu_bilgi =
       dto.params?.oyuncu_bilgi ??
       dto.params?.oyuncuNo ??
       dto.params?.playerId ??
       dto.params?.player ??
-      dto.params?.userIdentifier ??   // هذا هو الذي يرسله الـ backend حالياً
+      dto.params?.userIdentifier ??
       dto.params?.uid ??
       dto.params?.gameId ??
       dto.params?.user_id ??
       dto.params?.account;
 
+    const extra =
+      dto.params?.extra ??
+      dto.params?.extraField ??
+      dto.params?.ek_bilgi ??
+      dto.params?.additional ??
+      undefined;
+
     // هاتف اختياري إن توفر
-    const musteri_tel =
+    let musteri_tel =
       dto.params?.musteri_tel ??
       dto.params?.phone ??
       dto.params?.msisdn ??
-      dto.params?.tel;
+      dto.params?.tel ??
+      undefined;
+
+    // يتحقق إن كانت القيمة تبدو رقم هاتف (9-15 أرقام مع + اختياري)
+    const looksLikePhone = (v?: any) => {
+      const s = String(v ?? '').trim();
+      if (!s) return false;
+      return /^(\+?\d{9,15})$/.test(s);
+    };
 
     if (!oyuncu_bilgi) {
       this.logger.warn(`[Znet] Missing oyuncu_bilgi (player identifier) for productId=${dto.productId}`);
@@ -134,7 +150,17 @@ export class ZnetProvider implements ProviderDriver {
       };
     }
 
-    // نبني الـ query بالأسماء التي يفهمها znet تحديدًا
+    // إذا extra شكله هاتف وليس لدينا musteri_tel → أرسله في musteri_tel
+    if (extra && looksLikePhone(extra) && !musteri_tel) {
+      musteri_tel = String(extra).trim();
+    }
+
+    // إذا extra ليس هاتفًا → دمجه مع oyuncu_bilgi بمسافة واحدة
+    if (extra && !looksLikePhone(extra)) {
+      oyuncu_bilgi = `${String(extra).trim()} ${String(oyuncu_bilgi).trim()}`;
+    }
+
+    // ====== بناء الـ query النهائي الذي تفهمه ZNET ======
     const q: any = {
       ...auth,
       oyun,
@@ -143,8 +169,6 @@ export class ZnetProvider implements ProviderDriver {
       oyuncu_bilgi,
     };
     if (musteri_tel) q.musteri_tel = musteri_tel;
-
-    // (لا ننشر dto.params كما هي حتى لا نرسل userIdentifier باسم غير معروف لدى znet)
 
     // لوج قبل الإرسال (إخفاء sifre)
     const redacted = { ...q, sifre: q?.sifre ? '***' : undefined };
@@ -170,6 +194,12 @@ export class ZnetProvider implements ProviderDriver {
         ? Math.abs(parseFloat(String(r.cost ?? 0).replace(',', '.')))
         : undefined;
 
+      // قد يحتوي pin_ekle على رسالة توصيفية أحيانًا
+      const note =
+        (r as any)?.desc?.toString()?.trim?.() ||
+        (r as any)?.message?.toString()?.trim?.() ||
+        undefined;
+
       return {
         success,
         externalOrderId: txnId ? String(txnId) : referans,
@@ -178,6 +208,7 @@ export class ZnetProvider implements ProviderDriver {
         price,
         raw: r,
         costCurrency: success ? 'TRY' : undefined,
+        note,
       };
     } catch (err: any) {
       this.logger.error(`[Znet] pin_ekle error: ${String(err?.message || err)}`);
@@ -192,11 +223,27 @@ export class ZnetProvider implements ProviderDriver {
   async checkOrders(
     cfg: IntegrationConfig,
     ids: string[]
-  ): Promise<Array<{ externalOrderId: string; providerStatus: string; mappedStatus: Mapped; raw: any }>> {
+  ): Promise<Array<{
+    externalOrderId: string;
+    providerStatus: string;   // عادةً 1/2/3 كنص
+    mappedStatus: Mapped;     // pending/success/failed
+    raw: any;                 // يتضمن text/pin/desc
+    /** ملاحظة الحالة من ZNET (note/desc) */
+    note?: string;
+    /** كود PIN إن توفر */
+    pin?: string;
+  }>> {
     const base = this.baseUrl(cfg);
     const auth = this.authQuery(cfg);
 
-    const out: Array<{ externalOrderId: string; providerStatus: string; mappedStatus: Mapped; raw: any }> = [];
+    const out: Array<{
+      externalOrderId: string;
+      providerStatus: string;
+      mappedStatus: Mapped;
+      raw: any;
+      note?: string;
+      pin?: string;
+    }> = [];
 
     for (const id of ids) {
       const q = { ...auth, tahsilat_api_islem_id: id };
@@ -207,17 +254,28 @@ export class ZnetProvider implements ProviderDriver {
       this.logger.debug(`[Znet] pin_kontrol <- raw="${String(text).slice(0, 200)}"`);
 
       const r = ZnetParser.parsePinKontrol(text);
+      const statusCode = String(r.statusCode ?? 'unknown').trim();
 
       const mapped: Mapped =
         r.mapped === 'success' ? 'success' :
         r.mapped === 'failed'  ? 'failed'  :
         'pending';
 
+      // ملاحظة + PIN
+      const note =
+        (r as any)?.desc?.toString()?.trim?.() ||
+        (r as any)?.note?.toString()?.trim?.() ||
+        undefined;
+      const pin =
+        (r as any)?.pin != null ? String((r as any).pin).trim() : undefined;
+
       out.push({
         externalOrderId: String(id),
-        providerStatus: String(r.statusCode ?? 'unknown'),
-        mappedStatus: mapped,
-        raw: { text, pin: r.pin, desc: r.desc },
+        providerStatus: statusCode,         // "1" | "2" | "3" | "unknown"
+        mappedStatus: mapped,               // pending | success | failed
+        note,
+        pin,
+        raw: { text, pin: r.pin, desc: r.desc, statusCode },
       });
     }
 

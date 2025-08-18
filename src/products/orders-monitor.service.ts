@@ -52,11 +52,12 @@ export class OrdersMonitorService {
         const res = await this.integrations.checkOrders(order.providerId, [order.externalOrderId]);
         const first = Array.isArray(res) ? res[0] : (res as any);
 
-        // ✅ نعطي أولوية للماب الجاهز من الدرايفر: success|pending|failed
+        // ===================== استخراج الحالة/الملاحظة/PIN =====================
+        // أولوية للماب الجاهز من الدرايفر: success|pending|failed
         let statusRaw: string | undefined = first?.mappedStatus;
 
-        // ✅ Fallback: لو providerStatus = 1/2/3 حسب ما ثبّتّوه:
-        // 1 = pending (انتظار) | 2 = success (قبول) | 3 = failed (رفض)
+        // Fallback: providerStatus = 1/2/3 → نطبّق الخريطة المطلوبة
+        // 1 = pending (قيد المعالجة) | 2 = success (ناجح) | 3 = failed (مرفوض)
         if (!statusRaw) {
           const code = String(first?.providerStatus ?? '').trim();
           if (code === '1') statusRaw = 'pending';
@@ -64,7 +65,7 @@ export class OrdersMonitorService {
           else if (code === '3') statusRaw = 'failed';
         }
 
-        // ✅ آخر fallback لباقي الحقول المعتادة
+        // آخر fallback
         statusRaw =
           statusRaw ??
           (first as any)?.status ??
@@ -73,39 +74,84 @@ export class OrdersMonitorService {
           (first as any)?.providerStatus ??
           'processing';
 
-        const message: string =
-          (first?.raw && (first.raw.message || first.raw.desc || first.raw.raw || first.raw.text)) ||
+        // note من الدرايفر أو من الحقول الشائعة في الرد الخام
+        const note: string | undefined =
+          (first as any)?.note?.toString?.().trim?.() ||
+          (first?.raw as any)?.desc?.toString?.().trim?.() ||
+          (first?.raw as any)?.note?.toString?.().trim?.() ||
+          (first?.raw as any)?.message?.toString?.().trim?.() ||
+          (first?.raw as any)?.text?.toString?.().trim?.();
+
+        // pin من الدرايفر أو من الرد الخام
+        const pin: string | undefined =
+          (first as any)?.pin != null
+            ? String((first as any)?.pin).trim()
+            : (first?.raw as any)?.pin != null
+              ? String((first?.raw as any)?.pin).trim()
+              : undefined;
+
+        // رسالة موجزة fallback إن لم توجد note
+        const fallbackMsg: string =
+          (first?.raw && ((first.raw as any).message || (first.raw as any).desc || (first.raw as any).raw || (first.raw as any).text)) ||
           'sync';
 
-        // طبّق توحيد الحالات ثم خزّن
+        // ===================== تحديث حقول الطلب =====================
         const extStatus = this.normalizeExternalStatus(statusRaw || 'processing');
 
         order.externalStatus = extStatus;
         order.lastSyncAt = new Date();
-        order.lastMessage = String(message || '').slice(0, 250);
 
+        const msgToStore = String((note ?? fallbackMsg) || '').slice(0, 250);
+        order.lastMessage = msgToStore;
+
+        // خزّن PIN إن توفّر
+        if (pin) {
+          order.pinCode = pin;
+        }
+
+        // أضف سجلًا في notes بصيغة { by:'system', text, at }
+        try {
+          const nowIso = new Date().toISOString();
+          const arr = Array.isArray(order.notes) ? order.notes : [];
+          if (note && note.trim()) {
+            arr.push({ by: 'system', text: note, at: nowIso });
+          } else if (fallbackMsg && fallbackMsg !== 'sync') {
+            // نسجّل fallbackMsg كمعلومة نظام عند وجود نص مفيد
+            arr.push({ by: 'system', text: fallbackMsg, at: nowIso });
+          }
+          order.notes = arr;
+        } catch {
+          // في حال أي خلل غير متوقع، لا نوقف التدفق
+        }
+
+        // إن كانت الحالة نهائية، احتسب زمن الإتمام ثم خزّن
         const isTerminal = extStatus === 'done' || extStatus === 'failed';
         if (isTerminal) {
           order.completedAt = new Date();
           order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : 0;
+
+          // خزّن الحقول (lastMessage/notes/pinCode/…)
           await this.orderRepo.save(order);
 
+          // حدّث الحالة الداخلية وفق المطلوب: 2→approved, 3→rejected
           if (extStatus === 'done') {
             await this.productsService.updateOrderStatus(order.id, 'approved');
           } else {
             await this.productsService.updateOrderStatus(order.id, 'rejected');
           }
         } else {
+          // غير نهائي — خزّن التحديثات فقط
           await this.orderRepo.save(order);
         }
 
+        // لوج المتابعة
         await this.logRepo.save(
           this.logRepo.create({
             order,
             action: 'refresh',
             result: extStatus === 'failed' ? 'fail' : 'success',
-            message,
-            payloadSnapshot: { response: res },
+            message: msgToStore,
+            payloadSnapshot: { response: res, extracted: { note, pin, statusRaw } },
           }),
         );
       } catch (err: any) {
@@ -127,9 +173,9 @@ export class OrdersMonitorService {
   private normalizeExternalStatus(raw: string): ExternalStatus {
     const s = (raw || '').toString().toLowerCase();
     // قبول نهائي
-    if (['success', 'completed', 'complete', 'ok', 'done'].includes(s)) return 'done';
+    if (['success', 'completed', 'complete', 'ok', 'done', '2'].includes(s)) return 'done';
     // رفض/فشل نهائي
-    if (['fail', 'failed', 'error', 'rejected', 'cancelled', 'canceled'].includes(s)) return 'failed';
+    if (['fail', 'failed', 'error', 'rejected', 'cancelled', 'canceled', '3'].includes(s)) return 'failed';
     // أرسل/مصفوف
     if (['sent', 'queued', 'queue', 'accepted'].includes(s)) return 'sent';
     // قيد التنفيذ/انتظار

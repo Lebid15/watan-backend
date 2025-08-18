@@ -9,6 +9,7 @@ import {
   Req,
   UseGuards,
   Patch,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ProductsService } from './products.service';
@@ -25,48 +26,13 @@ export type OrderStatus = 'pending' | 'approved' | 'rejected';
 export class ProductOrdersController {
   constructor(private readonly productsService: ProductsService) {}
 
-  /** إنشاء طلب جديد (المستخدم الحالي فقط) */
-  @Post()
-  async createOrder(
-    @Body()
-    body: {
-      productId: string;
-      packageId: string;
-      quantity: number;
-      userIdentifier?: string;
-    },
-    @Req() req: Request
-  ) {
-    const user = req.user as any;
-
-    const order = await this.productsService.createOrder({
-      ...body,
-      userId: user.id, // 🔒 المستخدم الحقيقي من الـ JWT
-    });
-
-    return {
-      id: order.id,
-      status: order.status,
-      // السعر بالدولار (داخلي)
-      priceUSD: order.priceUSD,
-      unitPriceUSD: order.unitPriceUSD,
-      // السعر المعروض بعملة المستخدم
-      display: order.display,
-      createdAt: order.createdAt,
-      product: { name: order.product?.name ?? '' },
-      package: { name: order.package?.name ?? '' },
-      userIdentifier: order.userIdentifier ?? null,
-    };
-  }
-
   /** طلبات المستخدم الحالي — الآن مع pagination (items + pageInfo) */
   @Get('me')
   async getMyOrders(@Req() req: Request, @Query() query: ListOrdersDto) {
     const user = req.user as any;
-    // نمرر userId للدالة المبنية على keyset cursor
     return this.productsService.listOrdersWithPagination({
       ...query,
-      // @ts-ignore: نضيف خاصية مؤقتة تقرأها service
+      // @ts-ignore: خاصية مؤقتة تقرأها service لتصفية الطلبات حسب المستخدم
       userId: user.id,
     } as any);
   }
@@ -81,7 +47,7 @@ export class ProductOrdersController {
   ) {
     return this.productsService.listOrdersWithPagination({
       ...query,
-      // @ts-ignore
+      // @ts-ignore: خاصية مؤقتة تقرأها service
       userId,
     } as any);
   }
@@ -95,11 +61,58 @@ export class ProductOrdersController {
     return this.productsService.listOrdersForAdmin(query);
   }
 
+  /** ✅ تفاصيل طلب للمستخدم الحالي (تشمل الملاحظات والرسائل) */
+  @Get(':id')
+  async getOrderDetails(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Req() req: Request
+  ) {
+    const user = req.user as any;
+    return this.productsService.getOrderDetailsForUser(id, user.id);
+  }
+
+  /** إنشاء طلب جديد (المستخدم الحالي فقط) */
+  @Post()
+  async createOrder(
+    @Body()
+    body: {
+      productId: string;
+      packageId: string;
+      quantity: number;
+      userIdentifier?: string;
+      extraField?: string; // جديد
+    },
+    @Req() req: Request
+  ) {
+    const user = req.user as any;
+
+    const order = await this.productsService.createOrder({
+      ...body,
+      userId: user.id, // 🔒 من الـ JWT
+    });
+
+    return {
+      id: order.id,
+      status: order.status,
+      // السعر بالدولار (داخلي)
+      priceUSD: order.priceUSD,
+      unitPriceUSD: order.unitPriceUSD,
+      // السعر المعروض بعملة المستخدم
+      display: order.display,
+      createdAt: order.createdAt,
+      product: { name: order.product?.name ?? '' },
+      package: { name: order.package?.name ?? '' },
+      userIdentifier: order.userIdentifier ?? null,
+      extraField: order.extraField ?? null,
+    };
+  }
+
+  /** تعديل حالة الطلب — للأدمن */
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
   @Patch(':id/status')
   async setStatus(
-    @Param('id') id: string,
+    @Param('id', new ParseUUIDPipe()) id: string,
     @Body('status') status: 'approved' | 'rejected'
   ) {
     const updated = await this.productsService.updateOrderStatus(id, status);

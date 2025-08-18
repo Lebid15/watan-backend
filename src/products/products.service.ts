@@ -16,6 +16,8 @@ import { IntegrationsService } from '../integrations/integrations.service';
 import { AccountingPeriodsService } from '../accounting/accounting-periods.service';
 import { decodeCursor, encodeCursor, toEpochMs } from '../utils/pagination';
 import { ListOrdersDto } from './dto/list-orders.dto';
+import { CodeItem } from '../codes/entities/code-item.entity';
+
 
 export type OrderStatus = 'pending' | 'approved' | 'rejected';
 
@@ -57,6 +59,124 @@ export class ProductsService {
     private readonly accounting: AccountingPeriodsService,
   ) {}
 
+  // ===== Helper: تطبيع حالة المزود إلى done/failed/processing/sent مع دعم 1/2/3 =====
+  private normalizeExternalStatus(raw?: string): 'done' | 'failed' | 'processing' | 'sent' {
+    const s = (raw || '').toString().toLowerCase().trim();
+    if (['2', 'success', 'ok', 'done', 'completed', 'complete'].includes(s)) return 'done';
+    if (['3', 'failed', 'fail', 'error', 'rejected', 'cancelled', 'canceled'].includes(s)) return 'failed';
+    if (['accepted', 'sent', 'queued', 'queue'].includes(s)) return 'sent';
+    return 'processing'; // '1' أو pending/processing
+  }
+
+  // ===== ✅ المزامنة اليدوية مع المزود + التقاط note/pin =====
+  async syncExternal(orderId: string): Promise<{
+    order: ProductOrder;
+    extStatus: 'done' | 'failed' | 'processing' | 'sent';
+    note?: string;
+    pin?: string;
+  }> {
+    const order = await this.ordersRepo.findOne({
+      where: { id: orderId },
+      relations: ['user', 'package', 'product'],
+    });
+    if (!order) throw new NotFoundException('الطلب غير موجود');
+
+    if (!order.providerId || !order.externalOrderId) {
+      throw new BadRequestException('الطلب غير مرسل خارجيًا');
+    }
+
+    // لو منتهٍ لا نمنع، لكن سنُرجع الحالة فورًا
+    const alreadyTerminal =
+      order.externalStatus === 'done' ||
+      order.externalStatus === 'failed' ||
+      order.status === 'approved' ||
+      order.status === 'rejected';
+
+    const res = await this.integrations.checkOrders(order.providerId, [order.externalOrderId]);
+    const first: any = Array.isArray(res) ? res[0] : res;
+
+    // استنتاج الحالة
+    let statusRaw: string | undefined = first?.mappedStatus;
+    if (!statusRaw) {
+      const code = String(first?.providerStatus ?? '').trim();
+      if (code === '1') statusRaw = 'pending';
+      else if (code === '2') statusRaw = 'success';
+      else if (code === '3') statusRaw = 'failed';
+    }
+    statusRaw =
+      statusRaw ??
+      first?.status ??
+      first?.state ??
+      first?.orderStatus ??
+      first?.providerStatus ??
+      'processing';
+
+    const extStatus = this.normalizeExternalStatus(statusRaw);
+
+    // التقاط note/pin
+    const note: string | undefined =
+      first?.note?.toString?.().trim?.() ||
+      first?.raw?.desc?.toString?.().trim?.() ||
+      first?.raw?.note?.toString?.().trim?.() ||
+      first?.raw?.message?.toString?.().trim?.() ||
+      first?.raw?.text?.toString?.().trim?.();
+
+    const pin: string | undefined =
+      first?.pin != null ? String(first.pin).trim()
+        : first?.raw?.pin != null ? String(first.raw.pin).trim()
+        : undefined;
+
+    // تحديث الحقول
+    order.externalStatus = extStatus;
+    order.lastSyncAt = new Date();
+    order.lastMessage = String(note || first?.raw?.message || first?.raw?.desc || 'sync').slice(0, 250) || null;
+    if (pin) order.pinCode = pin;
+
+    // إضافة سجل في notes
+    const nowIso = new Date().toISOString();
+    if (note && note.trim()) {
+      const arr = Array.isArray(order.notes) ? order.notes : [];
+      arr.push({ by: 'system', text: note, at: nowIso });
+      order.notes = arr as any;
+      (order as any).providerMessage = note;    // ⬅️ لعرض رسالة المزوّد مباشرة
+      (order as any).notesCount = arr.length;   // ⬅️ عدّاد الملاحظات
+
+    }
+
+    // إن كانت نهائية احسب الإتمام
+    const isTerminal = extStatus === 'done' || extStatus === 'failed';
+    if (isTerminal) {
+      order.completedAt = new Date();
+      order.durationMs = order.sentAt ? (order.completedAt.getTime() - order.sentAt.getTime()) : 0;
+    }
+
+    await this.ordersRepo.save(order);
+
+    // تحديث الحالة الداخلية لو نهائي
+    if (isTerminal && !alreadyTerminal) {
+      if (extStatus === 'done') {
+        await this.updateOrderStatus(order.id, 'approved');
+      } else {
+        await this.updateOrderStatus(order.id, 'rejected');
+      }
+    }
+
+    // لوج
+    await this.logsRepo.save(
+      this.logsRepo.create({
+        order,
+        action: 'refresh',
+        result: extStatus === 'failed' ? 'fail' : 'success',
+        message: order.lastMessage || 'sync',
+        payloadSnapshot: { response: res, extracted: { note, pin, statusRaw } },
+      }),
+    );
+
+    return { order, extStatus, note, pin };
+  }
+
+  // ========= بقية الملف كما هو (بدون تغيير) =========
+
   async updateImage(id: string, imageUrl: string): Promise<Product> {
     const product = await this.productsRepo.findOne({ where: { id } });
     if (!product) {
@@ -65,7 +185,6 @@ export class ProductsService {
     product.imageUrl = imageUrl;
     return this.productsRepo.save(product);
   }
-
   // =====================================
   // 🔹 المنتجات
   // =====================================
@@ -331,7 +450,83 @@ export class ProductsService {
       where: { package: { id: order.package.id } as any },
       relations: ['package'],
     });
-    if (!routing || routing.mode !== 'auto' || !routing.primaryProviderId) return;
+    if (!routing || routing.mode !== 'auto') return;
+
+    // =========================
+    // 🟢 توجيه داخلي: قسم الأكواد
+    // =========================
+    if (routing.providerType === 'internal_codes' && routing.codeGroupId) {
+      await this.ordersRepo.manager.transaction(async (trx) => {
+        const itemRepo = trx.getRepository(CodeItem);
+        const orderRepo = trx.getRepository(ProductOrder);
+        const logRepo = trx.getRepository(OrderDispatchLog);
+
+        // 1) جلب أول كود متاح (FIFO)
+        const code = await itemRepo.findOne({
+          where: { groupId: routing.codeGroupId as any, status: 'available' },
+          order: { createdAt: 'ASC' },
+          lock: { mode: 'pessimistic_write' }, // حماية من السباق
+        });
+        if (!code) {
+          // نسجّل محاولة فاشلة ونخرج بدون رمي استثناء يعطّل بقية النظام
+          await logRepo.save(
+            logRepo.create({
+              order,
+              action: 'dispatch',
+              result: 'fail',
+              message: 'لا يوجد أكواد متاحة لهذه المجموعة',
+              payloadSnapshot: { providerType: 'internal_codes', codeGroupId: routing.codeGroupId },
+            }),
+          );
+          return;
+        }
+
+        // 2) وسم الكود كمستخدم وربطه بالطلب
+        code.status = 'used';
+        code.orderId = order.id;
+        code.usedAt = new Date();
+        await itemRepo.save(code);
+
+        // 3) كتابة الكود في ملاحظة الطلب + إنهاء الطلب بالقبول
+        const codeText = `CODE: ${code.pin ?? ''}${code.serial ? (code.pin ? ' / ' : '') + code.serial : ''}`.trim();
+        const nowIso = new Date().toISOString();
+
+        order.status = 'approved';
+        order.externalStatus = 'done' as any; // حالة خارجية منتهية للتوافق
+        order.lastMessage = codeText.slice(0, 250);
+        order.notes = [
+          ...(Array.isArray(order.notes) ? order.notes : []),
+          { by: 'system', text: codeText, at: nowIso },
+        ];
+        order.completedAt = new Date();
+        order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : (order.durationMs ?? 0);
+
+        await orderRepo.save(order);
+
+        // 4) لوج العملية
+        await logRepo.save(
+          logRepo.create({
+            order,
+            action: 'dispatch',
+            result: 'success',
+            message: order.lastMessage || 'code attached',
+            payloadSnapshot: {
+              providerType: 'internal_codes',
+              codeId: code.id,
+              code: { pin: code.pin, serial: code.serial },
+            },
+          }),
+        );
+      });
+
+      // تم التعامل مع الطلب داخليًا — لا نكمل لمنطق المزود الخارجي
+      return;
+    }
+
+    // =========================
+    // 🔵 مزوّد خارجي (المنطق الحالي)
+    // =========================
+    if (!routing.primaryProviderId) return;
 
     const tryOnce = async (providerId: string) => {
       const mapping = await this.mappingRepo.findOne({
@@ -347,6 +542,7 @@ export class ProductsService {
         params: {
           ...(mapping.meta || {}),
           userIdentifier: order.userIdentifier || undefined,
+          extraField: order.extraField || undefined,
         },
         clientOrderUuid: order.id,
       };
@@ -435,17 +631,25 @@ export class ProductsService {
       }
     }
   }
-
+  
   // ================ الطلبات =============
 
-  async createOrder(data: {
-    productId: string;
-    packageId: string;
-    quantity: number;
-    userId: string;
-    userIdentifier?: string;
-  }) {
-    const { productId, packageId, quantity, userId, userIdentifier } = data;
+async createOrder(data: {
+  productId: string;
+  packageId: string;
+  quantity: number;
+  userId: string;
+  userIdentifier?: string;
+  extraField?: string; 
+}) {
+  const {
+    productId,
+    packageId,
+    quantity,
+    userId,
+    userIdentifier,
+    extraField,
+  } = data;
 
     if (!quantity || quantity <= 0 || !Number.isFinite(Number(quantity))) {
       throw new BadRequestException('Quantity must be a positive number');
@@ -491,10 +695,11 @@ export class ProductsService {
         product,
         package: pkg,
         quantity,
-        price: totalUSD, // بالدولار
+        price: totalUSD,
         status: 'pending',
         user,
         userIdentifier: userIdentifier ?? null,
+        extraField: extraField ?? null,
       });
 
       const saved = await ordersRepo.save(order);
@@ -504,7 +709,6 @@ export class ProductsService {
       //   packageName: pkg.name,
       //   userIdentifier: userIdentifier ?? undefined,
       // });
-
       return {
         entityId: saved.id,
         view: {
@@ -521,6 +725,7 @@ export class ProductsService {
           product: { id: product.id, name: product.name },
           package: { id: pkg.id, name: pkg.name },
           userIdentifier: saved.userIdentifier ?? null,
+          extraField: saved.extraField ?? null,
           createdAt: saved.createdAt,
         },
       };
@@ -707,9 +912,8 @@ export class ProductsService {
 
         createdAt: order.createdAt.toISOString(),
         userEmail: order.user?.email || 'غير معروف',
-        userIdentifier: order.userIdentifier ?? null,
+        extraField: (order as any).extraField ?? null,
 
-        // ✅ نعيد imageUrl موحّد للواجهة
         product: {
           id: order.product?.id,
           name: order.product?.name,
@@ -720,7 +924,15 @@ export class ProductsService {
           name: order.package?.name,
           imageUrl: pickImage((order as any).package),
         },
+
+        /* ✅ الإضافات المفقودة */
+        providerMessage: (order as any).providerMessage ?? (order as any).lastMessage ?? null,
+        pinCode:        (order as any).pinCode ?? null,
+        notesCount:     Array.isArray((order as any).notes) ? (order as any).notes.length : 0,
+        manualNote:     (order as any).manualNote ?? null,
+        lastMessage:    (order as any).lastMessage ?? null, // لو احتاجها toClient كـ fallback
       };
+
     });
   }
 
@@ -753,6 +965,7 @@ export class ProductsService {
       );
     };
 
+    // داخل return orders.map(...) في getUserOrders
     return orders.map((order) => {
       const priceUSD = Number(order.price) || 0;
       const unitPriceUSD = order.quantity ? priceUSD / Number(order.quantity) : priceUSD;
@@ -770,6 +983,13 @@ export class ProductsService {
         },
         createdAt: order.createdAt,
         userIdentifier: order.userIdentifier ?? null,
+        extraField: (order as any).extraField ?? null,
+
+        // ✅ أضف هذي
+        providerMessage: (order as any).providerMessage ?? (order as any).lastMessage ?? null,
+        pinCode: (order as any).pinCode ?? null,
+        lastMessage: (order as any).lastMessage ?? null,
+
         product: {
           id: order.product.id,
           name: order.product.name,
@@ -779,10 +999,11 @@ export class ProductsService {
           id: order.package.id,
           name: order.package.name,
           imageUrl: (order.package as any)?.imageUrl ?? null,
-          productId: order.product.id, // اختياري، مفيد لو احتجناه لاحقًا
+          productId: order.product.id,
         },
       };
     });
+
   }
 
   // =============== ✅ تجميد FX عند الاعتماد (Idempotent) ===============
@@ -1262,10 +1483,9 @@ export class ProductsService {
       providerId: o.providerId ?? null,
       externalOrderId: o.externalOrderId ?? null,
       userIdentifier: o.userIdentifier ?? null,
-
+      extraField: (o as any).extraField ?? null,
       quantity: o.quantity,
 
-      // ✅ حقول التسعير التي يحتاجها الفرونت
       priceUSD,
       unitPriceUSD,
       display: {
@@ -1274,7 +1494,6 @@ export class ProductsService {
         totalPrice: totalUser,
       },
 
-      // حقول TRY للوحة الأدمن/التقارير
       currencyTRY: 'TRY',
       sellTRY,
       costTRY,
@@ -1294,7 +1513,15 @@ export class ProductsService {
 
       fxLocked: isFrozen,
       approvedLocalDate: frozen?.approvedLocalDate ?? null,
+
+      /* ✅ الإضافات المفقودة */
+      providerMessage: (o as any).providerMessage ?? (o as any).lastMessage ?? null,
+      pinCode:        (o as any).pinCode ?? null,
+      notesCount:     Array.isArray((o as any).notes) ? (o as any).notes.length : 0,
+      manualNote:     (o as any).manualNote ?? null,
+      lastMessage:    (o as any).lastMessage ?? null,
     };
+
   });
 
 
@@ -1492,6 +1719,7 @@ export class ProductsService {
         providerId: o.providerId ?? null,
         externalOrderId: o.externalOrderId ?? null,
         userIdentifier: o.userIdentifier ?? null,
+        extraField: (o as any).extraField ?? null,
 
         quantity: o.quantity,
         priceUSD,
@@ -1500,7 +1728,6 @@ export class ProductsService {
         profitTRY,
         currencyTRY: 'TRY',
 
-        // للعرض الجانبي إن أردت
         sellPriceAmount: priceUSD * userRate,
         sellPriceCurrency: userCode,
 
@@ -1511,7 +1738,15 @@ export class ProductsService {
         completedAt: o.completedAt ? o.completedAt.toISOString() : null,
         durationMs: (o as any).durationMs ?? null,
         createdAt: o.createdAt.toISOString(),
+
+        /* ✅ الإضافات المفقودة */
+        providerMessage: (o as any).providerMessage ?? (o as any).lastMessage ?? null,
+        pinCode:        (o as any).pinCode ?? null,
+        notesCount:     Array.isArray((o as any).notes) ? (o as any).notes.length : 0,
+        manualNote:     (o as any).manualNote ?? null,
+        lastMessage:    (o as any).lastMessage ?? null,
       };
+
     });
 
     const last = items[items.length - 1] || null;
@@ -1532,6 +1767,66 @@ export class ProductsService {
       },
     };
   }
+
+  // ✅ إضافة/قراءة ملاحظات الطلب
+  async addOrderNote(
+    orderId: string,
+    by: 'admin' | 'system' | 'user',
+    text: string
+  ) {
+    const order = await this.ordersRepo.findOne({ where: { id: orderId } });
+    if (!order) throw new NotFoundException('الطلب غير موجود');
+
+    const now = new Date().toISOString();
+    const note = { by, text: String(text || '').slice(0, 500), at: now };
+
+    const current: any[] = Array.isArray((order as any).notes) ? (order as any).notes : [];
+    (order as any).notes = [...current, note];
+    (order as any).notesCount = (order as any).notes.length;
+
+    await this.ordersRepo.save(order);
+    return (order as any).notes;
+  }
+
+    // ✅ تفاصيل طلب لمستخدم معيّن (مع الملاحظات)
+  async getOrderDetailsForUser(orderId: string, userId: string) {
+    const order = await this.ordersRepo.findOne({
+      where: { id: orderId, user: { id: userId } as any },
+      relations: ['product', 'package', 'user', 'user.currency'],
+    });
+    if (!order) throw new NotFoundException('الطلب غير موجود');
+
+    const priceUSD = Number(order.price) || 0;
+    const rate = order.user?.currency ? Number(order.user.currency.rate) : 1;
+    const code = order.user?.currency ? order.user.currency.code : 'USD';
+
+    return {
+      id: order.id,
+      status: order.status,
+      quantity: order.quantity,
+      createdAt: order.createdAt,
+      userIdentifier: order.userIdentifier ?? null,
+      extraField: (order as any).extraField ?? null,
+
+      // عرض الأسعار للمستخدم
+      priceUSD,
+      unitPriceUSD: order.quantity ? priceUSD / Number(order.quantity) : priceUSD,
+      display: {
+        currencyCode: code,
+        unitPrice: (order.quantity ? priceUSD / Number(order.quantity) : priceUSD) * rate,
+        totalPrice: priceUSD * rate,
+      },
+
+      // معلومات المنتج/الباقة
+      product: { id: order.product?.id, name: order.product?.name, imageUrl: (order as any).product?.imageUrl ?? null },
+      package: { id: order.package?.id, name: order.package?.name, imageUrl: (order as any).package?.imageUrl ?? null },
+
+      manualNote: (order as any).manualNote ?? null,
+      providerMessage: (order as any).providerMessage ?? (order as any).lastMessage ?? null,
+      notes: Array.isArray((order as any).notes) ? (order as any).notes : [],
+    };
+  }
+
 
 } 
 

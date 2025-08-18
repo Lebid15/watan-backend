@@ -72,108 +72,174 @@ export class ProductOrdersAdminController {
     return Number.isFinite(n) ? n : undefined;
   }
 
-  /** تفطيح كائن الطلب لشكل يناسب الواجهة */
-  private toClient(o: ProductOrder) {
-    // TRY المجمّدة عند الاعتماد أولًا، ثم بدائل بسيطة
-    const sellTRY =
-      this.num((o as any).sellTryAtApproval) ??
-      (o.sellPriceCurrency === 'TRY'
-        ? this.num((o as any).sellPriceAmount ?? (o as any).price)
-        : undefined);
+/** تفطيح كائن الطلب لشكل يناسب الواجهة (يحترم الحقول الجاهزة من السيرفس) */
+private toClient(o: any) {
+  // 1) لو السيرفس أعاد القيم الجاهزة، استخدمها مباشرة
+  const preSellTRY   = (o as any).sellTRY;
+  const preCostTRY   = (o as any).costTRY;
+  const preProfitTRY = (o as any).profitTRY;
+  const preCurrencyTRY = (o as any).currencyTRY;
 
-    const costTRY =
-      this.num((o as any).costTryAtApproval) ??
-      (o.costCurrency === 'TRY' ? this.num((o as any).costAmount) : undefined);
+  // 2) fallback للحساب القديم فقط إن لم تكن القيم جاهزة
+  const num = (v: any): number | undefined => {
+    if (v == null) return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
 
-    const profitTRY =
-      this.num((o as any).profitTryAtApproval) ??
-      (sellTRY != null && costTRY != null
-        ? Number((sellTRY - costTRY).toFixed(2))
-        : undefined);
+  const calcSellTRY =
+    num((o as any).sellTryAtApproval) ??
+    ((o as any).sellPriceCurrency === 'TRY'
+      ? num((o as any).sellPriceAmount ?? (o as any).price)
+      : undefined);
 
-    const currencyTRY =
-      sellTRY != null || costTRY != null || profitTRY != null ? 'TRY' : undefined;
+  const calcCostTRY =
+    num((o as any).costTryAtApproval) ??
+    ((o as any).costCurrency === 'TRY' ? num((o as any).costAmount) : undefined);
 
-    return {
-      id: o.id,
-      orderNo: (o as any).orderNo ?? null,
-      status: o.status,
-      userIdentifier: (o as any).userIdentifier ?? null,
+  const calcProfitTRY =
+    num((o as any).profitTryAtApproval) ??
+    (calcSellTRY != null && calcCostTRY != null
+      ? Number((calcSellTRY - calcCostTRY).toFixed(2))
+      : undefined);
 
-      // مستخدم مسطّح
-      username:
-        ((o as any).user && ((o as any).user.username || (o as any).user.fullName)) || undefined,
-      userEmail: ((o as any).user && (o as any).user.email) || undefined,
+  const sellTRY   = preSellTRY   != null ? preSellTRY   : calcSellTRY;
+  const costTRY   = preCostTRY   != null ? preCostTRY   : calcCostTRY;
+  const profitTRY = preProfitTRY != null ? preProfitTRY : calcProfitTRY;
 
-      // المنتج والباقة (لللوغو والاسم)
-      product: o.product
-        ? {
-            id: (o.product as any).id,
-            name: (o.product as any).name,
-            imageUrl:
-              (o.product as any).imageUrl ||
-              (o.product as any).image ||
-              (o.product as any).logoUrl ||
-              (o.product as any).iconUrl ||
-              null,
-          }
-        : undefined,
-      package: o.package
-        ? {
-            id: (o.package as any).id,
-            name: (o.package as any).name,
-            imageUrl:
-              (o.package as any).imageUrl ||
-              (o.package as any).image ||
-              (o.package as any).logoUrl ||
-              (o.package as any).iconUrl ||
-              null,
-            productId: (o.product as any)?.id ?? null,
-          }
-        : undefined,
+  const currencyTRY =
+    preCurrencyTRY ??
+    (sellTRY != null || costTRY != null || profitTRY != null ? 'TRY' : undefined);
 
-      // ربط خارجي
-      providerId: (o as any).providerId ?? null,
-      providerName: null as string | null, // تُقرأ من /admin/integrations في الواجهة
-      externalOrderId: (o as any).externalOrderId ?? null,
+  // ملاحظات: لو السيرفس أعاد notesCount جاهزة استخدمها، وإلا احسب من notes[]
+  const notesCountReady =
+    (o as any).notesCount != null
+      ? Number((o as any).notesCount)
+      : Array.isArray((o as any).notes)
+      ? (o as any).notes.length
+      : 0;
 
-      // أزمنة
-      createdAt: o.createdAt,
-      sentAt: (o as any).sentAt ?? null,
-      completedAt: (o as any).completedAt ?? null,
-      durationMs: (o as any).durationMs ?? null,
+  return {
+    id: o.id,
+    orderNo: (o as any).orderNo ?? null,
+    status: o.status,
+    userIdentifier: (o as any).userIdentifier ?? null,
 
-      // التجميد/الموافقة
-      fxLocked: (o as any).fxLocked ?? false,
-      approvedLocalDate: (o as any).approvedLocalDate ?? undefined,
+    username:
+      ((o as any).user && ((o as any).user.username || (o as any).user.fullName)) ||
+      (o as any).username || undefined,
+    userEmail:
+      ((o as any).user && (o as any).user.email) ||
+      (o as any).userEmail || undefined,
 
-      // القيم الأصلية (لمن يلزم)
-      sellPriceAmount: this.num((o as any).sellPriceAmount ?? (o as any).price),
-      sellPriceCurrency: (o as any).sellPriceCurrency ?? 'USD',
-      costAmount: this.num((o as any).costAmount),
-      costCurrency: (o as any).costCurrency ?? 'USD',
-      price: this.num((o as any).price),
+    product: (o as any).product
+      ? {
+          id: (o as any).product.id,
+          name: (o as any).product.name,
+          imageUrl:
+            (o as any).product.imageUrl ||
+            (o as any).product.image ||
+            (o as any).product.logoUrl ||
+            (o as any).product.iconUrl ||
+            null,
+        }
+      : undefined,
+    package: (o as any).package
+      ? {
+          id: (o as any).package.id,
+          name: (o as any).package.name,
+          imageUrl:
+            (o as any).package.imageUrl ||
+            (o as any).package.image ||
+            (o as any).package.logoUrl ||
+            (o as any).package.iconUrl ||
+            null,
+          productId:
+            ((o as any).product && (o as any).product.id) ??
+            (o as any).package?.productId ??
+            null,
+        }
+      : undefined,
 
-      // قيم العرض المطلوبة للجدول
-      sellTRY,
-      costTRY,
-      profitTRY,
-      currencyTRY,
-    };
-  }
+    providerId: (o as any).providerId ?? null,
+    providerName: (o as any).providerName ?? null,
+    externalOrderId: (o as any).externalOrderId ?? null,
+
+    createdAt: (o as any).createdAt,
+    sentAt: (o as any).sentAt ?? null,
+    completedAt: (o as any).completedAt ?? null,
+    durationMs: (o as any).durationMs ?? null,
+
+    fxLocked: (o as any).fxLocked ?? false,
+    approvedLocalDate: (o as any).approvedLocalDate ?? undefined,
+
+    // أسعار البيع/التكلفة الأصلية (إن وُجدت)
+    sellPriceAmount: num((o as any).sellPriceAmount ?? (o as any).price),
+    sellPriceCurrency: (o as any).sellPriceCurrency ?? (o as any).currencyCode ?? 'USD',
+    costAmount: num((o as any).costAmount),
+    costCurrency: (o as any).costCurrency ?? 'USD',
+    price: num((o as any).price),
+
+    // قيم TRY النهائية الموثوقة
+    sellTRY,
+    costTRY,
+    profitTRY,
+    currencyTRY,
+
+    // الحقول الجديدة
+    providerMessage:
+      (o as any).providerMessage ??
+      (o as any).lastMessage ??
+      null,
+    pinCode: (o as any).pinCode ?? null,
+    notesCount: notesCountReady,
+    manualNote: (o as any).manualNote ?? null,
+  };
+}
+
 
   @Get()
   @Header('Cache-Control', 'no-store')
   async list(@Query() query: ListOrdersDto) {
-    // تُرجع items فيها sellTRY/costTRY/profitTRY + pageInfo
-    return this.productsService.listOrdersForAdmin(query);
+    const res = await this.productsService.listOrdersForAdmin(query);
+    if (res && Array.isArray((res as any).items)) {
+      // العناصر أصلاً مُسطّحة من السيرفس — أعدها كما هي
+      return res;
+    }
+    // وإلا (في حالات قديمة) استخدم toClient
+    if (Array.isArray(res)) {
+      return (res as any).map((o: ProductOrder) => this.toClient(o));
+    }
+    return res;
   }
-
 
 
   @Get('all')
   async getAllOrders() {
-    return this.productsService.getAllOrders();
+    const items = await this.productsService.getAllOrders();
+    return Array.isArray(items) ? items.map((o) => this.toClient(o)) : items;
+  }
+
+  /** ✅ إنشاء ملاحظة على طلب */
+  @Post(':id/notes')
+  async addNote(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() body: { text: string; by?: 'admin' | 'system' | 'user' },
+  ) {
+    const text = (body?.text || '').trim();
+    if (!text) throw new BadRequestException('النص مطلوب');
+    const by = (body?.by as any) || 'admin';
+
+    const notes = await this.productsService.addOrderNote(id, by, text);
+    return { orderId: id, notes };
+  }
+
+  /** ✅ جلب ملاحظات طلب */
+  @Get(':id/notes')
+  async getNotes(@Param('id', new ParseUUIDPipe()) id: string) {
+    const order = await this.orderRepo.findOne({ where: { id } });
+    if (!order) throw new NotFoundException('الطلب غير موجود');
+    return { orderId: id, notes: (order as any).notes ?? [] };
   }
 
   /** 🔹 تحويل الطلبات المحددة إلى Manual */
@@ -191,8 +257,11 @@ export class ProductOrdersAdminController {
       (order as any).lastSyncAt = null;
       (order as any).completedAt = null;
       (order as any).durationMs = null;
+
       if (note) (order as any).manualNote = note.slice(0, 500);
       await this.orderRepo.save(order);
+
+      await this.productsService.addOrderNote(order.id, 'admin', note ? `Manualize: ${note}` : 'Manualize');
 
       await this.logRepo.save(
         this.logRepo.create({
@@ -232,10 +301,12 @@ export class ProductOrdersAdminController {
           continue;
         }
         await this.performDispatch(order, providerId, note);
+        if (note) await this.productsService.addOrderNote(order.id, 'admin', `Dispatch: ${note}`);
         results.push({ id: order.id, ok: true });
       } catch (e: any) {
         const msg = String(e?.message ?? 'fail');
         this.logger.warn(`bulk/dispatch fail for ${order.id}: ${msg}`);
+        await this.productsService.addOrderNote(order.id, 'system', `Dispatch failed: ${msg}`);
         results.push({ id: order.id, ok: false, message: msg });
       }
     }
@@ -256,14 +327,14 @@ export class ProductOrdersAdminController {
     if (!ids?.length) throw new BadRequestException('ids is required');
 
     const orders = await this.orderRepo.findBy({ id: In(ids) as any });
-    let ok = 0,
-      fail = 0;
+    let ok = 0, fail = 0;
 
     for (const order of orders) {
       try {
         if (note) {
           (order as any).manualNote = note.slice(0, 500);
           await this.orderRepo.save(order);
+          await this.productsService.addOrderNote(order.id, 'admin', `Approve: ${note}`);
         }
         await this.productsService.updateOrderStatus(order.id, 'approved');
         await this.logRepo.save(
@@ -276,7 +347,8 @@ export class ProductOrdersAdminController {
           }),
         );
         ok++;
-      } catch {
+      } catch (e: any) {
+        await this.productsService.addOrderNote(order.id, 'system', `Approve failed: ${String(e?.message || 'fail')}`);
         fail++;
       }
     }
@@ -290,14 +362,14 @@ export class ProductOrdersAdminController {
     if (!ids?.length) throw new BadRequestException('ids is required');
 
     const orders = await this.orderRepo.findBy({ id: In(ids) as any });
-    let ok = 0,
-      fail = 0;
+    let ok = 0, fail = 0;
 
     for (const order of orders) {
       try {
         if (note) {
           (order as any).manualNote = note.slice(0, 500);
           await this.orderRepo.save(order);
+          await this.productsService.addOrderNote(order.id, 'admin', `Reject: ${note}`);
         }
         await this.productsService.updateOrderStatus(order.id, 'rejected');
         await this.logRepo.save(
@@ -310,7 +382,8 @@ export class ProductOrdersAdminController {
           }),
         );
         ok++;
-      } catch {
+      } catch (e: any) {
+        await this.productsService.addOrderNote(order.id, 'system', `Reject failed: ${String(e?.message || 'fail')}`);
         fail++;
       }
     }
@@ -331,105 +404,22 @@ export class ProductOrdersAdminController {
     }
 
     const result = await this.performDispatch(order, body.providerId, body.note);
+    if (body?.note) await this.productsService.addOrderNote(order.id, 'admin', `Dispatch: ${body.note}`);
     return { message: 'تم إرسال الطلب للموفّر', order: result };
   }
 
-  /** 🔹 تحديث حالة الطلب من المزوّد */
+  /** 🔹 تحديث حالة الطلب من المزوّد (قديم) */
   @Post(':id/refresh')
   async refreshOrder(@Param('id', new ParseUUIDPipe()) id: string) {
-    const order = await this.orderRepo.findOne({ where: { id } });
-    if (!order) throw new NotFoundException('الطلب غير موجود');
-    if (!(order as any).providerId || !(order as any).externalOrderId) {
-      throw new BadRequestException('الطلب غير مرسل خارجيًا');
-    }
+    // مُبقاة للتوافق؛ يُفضل استخدام sync-external
+    return this.syncExternal(id);
+  }
 
-    // إيقاف مبكّر
-    if (
-      (order as any).externalStatus === 'done' ||
-      (order as any).externalStatus === 'failed' ||
-      order.status === 'approved' ||
-      order.status === 'rejected'
-    ) {
-      return { message: 'الطلب منتهٍ بالفعل، لا حاجة للفحص', order };
-    }
-
-    try {
-      const res = await this.integrations.checkOrders(
-        (order as any).providerId,
-        [(order as any).externalOrderId],
-      );
-      const first = Array.isArray(res) ? res[0] : res;
-
-      let statusRaw: string | undefined = (first as any)?.mappedStatus;
-      if (!statusRaw) {
-        const code = String((first as any)?.providerStatus ?? '').trim();
-        if (code === '1') statusRaw = 'pending';
-        else if (code === '2') statusRaw = 'success';
-        else if (code === '3') statusRaw = 'failed';
-      }
-      statusRaw =
-        statusRaw ??
-        (first as any)?.status ??
-        (first as any)?.state ??
-        (first as any)?.orderStatus ??
-        (first as any)?.providerStatus ??
-        'processing';
-
-      const message: string =
-        ((first as any)?.raw &&
-          (((first as any).raw.message as any) ||
-            (first as any).raw.desc ||
-            (first as any).raw.raw)) ||
-        'sent';
-
-      const extStatus = this.normalizeExternalStatus(statusRaw || 'processing');
-
-      (order as any).externalStatus = extStatus;
-      (order as any).lastSyncAt = new Date();
-      (order as any).lastMessage = String(message || '').slice(0, 250) || null;
-
-      const isTerminal = extStatus === 'done' || extStatus === 'failed';
-      if (isTerminal) {
-        (order as any).completedAt = new Date();
-        (order as any).durationMs = (order as any).sentAt
-          ? (order as any).completedAt.getTime() -
-            (order as any).sentAt.getTime()
-          : 0;
-      }
-
-      await this.orderRepo.save(order);
-
-      if (extStatus === 'done') {
-        await this.productsService.updateOrderStatus(order.id, 'approved');
-      } else if (extStatus === 'failed') {
-        await this.productsService.updateOrderStatus(order.id, 'rejected');
-      }
-
-      await this.logRepo.save(
-        this.logRepo.create({
-          order,
-          action: 'refresh',
-          result: extStatus === 'failed' ? 'fail' : 'success',
-          message,
-          payloadSnapshot: { response: res },
-        }),
-      );
-
-      return { message: 'تم تحديث حالة الطلب', order };
-    } catch (err: any) {
-      const msg = String(err?.message ?? 'فشل تحديث الحالة').slice(0, 250);
-
-      await this.logRepo.save(
-        this.logRepo.create({
-          order,
-          action: 'refresh',
-          result: 'fail',
-          message: msg,
-        }),
-      );
-
-      throw new BadRequestException(msg);
-    }
+  /** ✅ مسار يدوي: سحب الحالة والملاحظة فورًا من المزوّد */
+  @Patch(':id/sync-external')
+  async syncExternal(@Param('id', new ParseUUIDPipe()) id: string) {
+    const result = await this.productsService.syncExternal(id);
+    return { message: 'تمت المزامنة مع المزوّد', order: result.order };
   }
 
   /** 🔹 تعديل حالة الطلب يدويًا */
@@ -449,6 +439,9 @@ export class ProductOrdersAdminController {
     if (note) {
       (order as any).manualNote = note.slice(0, 500);
       await this.orderRepo.save(order);
+      await this.productsService.addOrderNote(order.id, 'admin', `Manual ${status}: ${note}`);
+    } else {
+      await this.productsService.addOrderNote(order.id, 'admin', `Manual ${status}`);
     }
 
     const updated = await this.productsService.updateOrderStatus(id, status);
@@ -518,6 +511,7 @@ export class ProductOrdersAdminController {
     providerId?: string | null,
     note?: string,
   ) {
+    // ... (نفس منطقك الحالي دون تغيير)
     const order =
       (orderInput as any)?.package && (orderInput as any)?.user
         ? orderInput
@@ -588,6 +582,7 @@ export class ProductOrdersAdminController {
         musteri_tel: musteriTel,
         oyun,
         kupur,
+        extra: (order as any).extraField ?? undefined,
       },
       clientOrderUuid: order.id,
     };
@@ -643,6 +638,8 @@ export class ProductOrdersAdminController {
         payloadSnapshot: { providerId: chosenProviderId, payload, response: res },
       }),
     );
+
+    await this.productsService.addOrderNote(order.id, 'system', `Dispatched → ext=${extStatus}, msg=${message}`);
 
     return order;
   }
