@@ -245,4 +245,15 @@ export class UserService {
       currencyCode: user.currency?.code ?? 'USD',
     };
   }
+
+  // أضِف هذه الدالة
+  async findByIdWithPassword(id: string): Promise<User | null> {
+    return this.usersRepository.createQueryBuilder('u')
+      .addSelect('u.password') // يضمن إرجاع الحقل حتى لو select:false
+      .leftJoinAndSelect('u.priceGroup', 'priceGroup')
+      .leftJoinAndSelect('u.currency', 'currency')
+      .where('u.id = :id', { id })
+      .getOne();
+  }
+
 }

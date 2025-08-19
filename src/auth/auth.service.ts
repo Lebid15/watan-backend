@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, ConflictException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ConflictException, NotFoundException } from '@nestjs/common';
 import { UserService } from '../user/user.service';
 import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
@@ -65,4 +65,18 @@ export class AuthService {
     const { password, ...result } = newUser;
     return result;
   }
+
+  async changePassword(userId: string, oldPassword: string, newPassword: string): Promise<void> {
+    // استخدم الدالة الجديدة لضمان جلب password
+    const user = await this.userService.findByIdWithPassword(userId);
+    if (!user) throw new NotFoundException('User not found');
+
+    const ok = await bcrypt.compare(oldPassword, user.password);
+
+    if (!ok) throw new UnauthorizedException('كلمة السر الحالية غير صحيحة');
+
+    await this.userService.setPassword(userId, newPassword); // يهشّر داخلها 👍
+  }
+
+
 }

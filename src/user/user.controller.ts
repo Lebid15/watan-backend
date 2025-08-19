@@ -10,6 +10,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthGuard } from '@nestjs/passport';
+import { AdminSetPasswordDto } from './dto/admin-set-password.dto';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 
 @ApiTags('Users')
@@ -170,18 +171,6 @@ export class UserController {
   ) {
     return this.userService.addFunds(id, Number(amount));
   }
-  
-  // تغيير كلمة السر
-  @Patch(':id/password')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
-  @ApiBearerAuth()
-  async setPassword(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body('password') password: string,
-  ) {
-    return this.userService.setPassword(id, password);
-  }
 
   // حد السالب
   @Patch(':id/overdraft')
@@ -194,4 +183,17 @@ export class UserController {
   ) {
     return this.userService.setOverdraft(id, Number(overdraftLimit));
   }
+
+  @Patch(':id/password')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Admin: set user password' })
+  async adminSetPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AdminSetPasswordDto,
+  ) {
+    return this.userService.setPassword(id, dto.password);
+  }
+
 }
