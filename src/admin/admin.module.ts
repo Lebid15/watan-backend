@@ -16,15 +16,20 @@ import { ProductOrder } from '../products/product-order.entity';
 import { Currency } from '../currencies/currency.entity';
 import { User } from '../user/user.entity';
 import { IntegrationsModule } from '../integrations/integrations.module';
+import { SiteSetting } from './site-setting.entity';
+import { SiteSettingsService } from './site-settings.service';
+import { SiteSettingsAdminController } from './site-settings.admin.controller';
+
 
 @Module({
   imports: [
     UserModule,
-    ProductsModule, // ✅ يجعل AccountingPeriodsService متاحًا هنا
+    ProductsModule,
     IntegrationsModule,
-    TypeOrmModule.forFeature([ProductOrder, Currency, User]),
+    TypeOrmModule.forFeature([ProductOrder, Currency, User, SiteSetting]),
   ],
-  controllers: [AdminController, UploadController, ReportsAdminController],
-  providers: [JwtAuthGuard, RolesGuard],
+  controllers: [AdminController, UploadController, ReportsAdminController, SiteSettingsAdminController],
+  providers: [JwtAuthGuard, RolesGuard, SiteSettingsService],
+  exports: [SiteSettingsService],
 })
 export class AdminModule {}

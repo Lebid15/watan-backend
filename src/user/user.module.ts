@@ -7,17 +7,19 @@ import { UserService } from './user.service';
 import { UserController } from './user.controller';
 
 import { PriceGroup } from '../products/price-group.entity';
-import { CurrenciesModule } from '../currencies/currencies.module'; // ✅ باقٍ كما هو
-import { NotificationsModule } from '../notifications/notifications.module'; // ✅ جديد
+import { CurrenciesModule } from '../currencies/currencies.module'; 
+import { NotificationsModule } from '../notifications/notifications.module'; 
+import { SiteSetting } from '../admin/site-setting.entity';
+import { PagesController } from './pages.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, PriceGroup]),
-    CurrenciesModule,       // يوفر عملة/أسعار الصرف كما كنت تعمل
-    NotificationsModule,    // ✅ ضروري لحقن NotificationsService في UserService
+    TypeOrmModule.forFeature([User, PriceGroup, SiteSetting]),
+    CurrenciesModule,
+    NotificationsModule,
   ],
   providers: [UserService],
-  controllers: [UserController],
+  controllers: [UserController, PagesController],
   exports: [UserService],
 })
 export class UserModule {}
