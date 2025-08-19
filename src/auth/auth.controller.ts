@@ -60,7 +60,6 @@ export class AuthController {
     return this.authService.register(body);
   }
 
-  // 👇 المسار الجديد
   @Post('change-password')
   @UseGuards(JwtAuthGuard)
   async changePassword(@Req() req, @Body() body: ChangePasswordDto) {
@@ -72,6 +71,7 @@ export class AuthController {
       body.oldPassword,
       body.newPassword,
     );
+    
     return { ok: true };
   }
 }
