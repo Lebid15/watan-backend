@@ -33,12 +33,17 @@ const origins = (process.env.CORS_ORIGIN || '')
   .map(s => s.trim())
   .filter(Boolean);
 
+// CORS
 app.enableCors({
-  origin: origins.length ? origins : ['http://localhost:3000'], // ضع دومين النكست هنا
-  credentials: true,
-  methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  origin: [
+    'https://watan-frontend.onrender.com',
+    'http://localhost:3000',
+  ],
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  credentials: false, // فعّل true فقط لو تستخدم كوكيز
 });
+
 
   // /api prefix
   app.setGlobalPrefix('api');
