@@ -17,12 +17,14 @@ export class IntegrationsController {
 
   @Post()
   create(@Body() dto: CreateIntegrationDto) {
-    return this.svc.create(dto);
+    // أي إنشاء من صفحة المشرف = tenant
+    return this.svc.create({ ...dto, scope: 'tenant' } as any);   // ← CHANGED
   }
 
   @Get()
   list() {
-    return this.svc.list();
+    // لا نعرض dev هنا
+    return this.svc.list('tenant');                               // ← CHANGED
   }
 
   // ⬇️ جديد: جلب مزود واحد بالتعريف

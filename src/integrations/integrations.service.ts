@@ -47,6 +47,19 @@ export class IntegrationsService {
     private readonly codeItemRepo: Repository<CodeItem>,
   ) {}
 
+  /** تطبيع إعدادات التكامل للدرايفر: إزالة null وتحويله إلى undefined */
+  private toConfig(i: Integration) /*: IntegrationConfig */ {
+    return {
+      id: i.id,
+      name: i.name,
+      provider: i.provider as any,
+      baseUrl: i.baseUrl ?? undefined,
+      apiToken: i.apiToken ?? undefined,
+      kod: i.kod ?? undefined,
+      sifre: i.sifre ?? undefined,
+    };
+  }
+
   // ===== CRUD للتكاملات =====
   async create(dto: {
     name: string;
@@ -55,13 +68,21 @@ export class IntegrationsService {
     apiToken?: string;
     kod?: string;
     sifre?: string;
+    scope?: 'tenant' | 'dev';
   }) {
-    const entity = this.integrationRepo.create(dto);
+    const entity = this.integrationRepo.create({
+      scope: dto.scope ?? ('tenant' as any),
+      ...dto,
+    } as any);
     return this.integrationRepo.save(entity);
   }
 
-  list() {
-    return this.integrationRepo.find({ order: { createdAt: 'DESC' } as any });
+  list(scope?: 'tenant' | 'dev') {
+    const where = scope ? ({ scope } as any) : undefined;
+    return this.integrationRepo.find({
+      where,
+      order: { createdAt: 'DESC' } as any,
+    });
   }
 
   async get(id: string) {
@@ -87,20 +108,20 @@ export class IntegrationsService {
   async testConnection(id: string) {
     const cfg = await this.get(id);
     const driver = this.driverOf(cfg);
-    return driver.getBalance(cfg);
+    return driver.getBalance(this.toConfig(cfg));
   }
 
   async refreshBalance(id: string) {
     const cfg = await this.get(id);
     const driver = this.driverOf(cfg);
-    const { balance } = await driver.getBalance(cfg);
+    const { balance } = await driver.getBalance(this.toConfig(cfg));
     return { balance };
   }
 
   async syncProducts(id: string): Promise<NormalizedProduct[]> {
     const cfg = await this.get(id);
     const driver = this.driverOf(cfg);
-    return driver.listProducts(cfg);
+    return driver.listProducts(this.toConfig(cfg));
   }
 
   async placeOrder(
@@ -110,14 +131,14 @@ export class IntegrationsService {
     const cfg = await this.get(id);
     const driver = this.driverOf(cfg);
     if (!driver.placeOrder) throw new Error('placeOrder not supported for this provider');
-    return driver.placeOrder(cfg, payload);
+    return driver.placeOrder(this.toConfig(cfg), payload);
   }
 
   async checkOrders(id: string, ids: string[]) {
     const cfg = await this.get(id);
     const driver = this.driverOf(cfg);
     if (!driver.checkOrders) throw new Error('checkOrders not supported for this provider');
-    return driver.checkOrders(cfg, ids);
+    return driver.checkOrders(this.toConfig(cfg), ids);
   }
 
   // ===== صفحة الربط حسب مزوّد واحد (موجودة سابقًا) =====
@@ -137,7 +158,7 @@ export class IntegrationsService {
     qb.orderBy('product.name', 'ASC').addOrderBy('pkg.name', 'ASC');
     const ourPkgs = await qb.getMany();
 
-    const providerData: NormalizedProduct[] = await driver.listProducts(cfg);
+    const providerData: NormalizedProduct[] = await driver.listProducts(this.toConfig(cfg));
     const mappings = await this.packageMappingsRepo.find({ where: { provider_api_id: id } });
 
     const providerList = providerData.map((p) => ({ id: String(p.externalId), name: p.name }));
@@ -158,7 +179,7 @@ export class IntegrationsService {
       };
     });
 
-    const { balance } = await driver.getBalance(cfg);
+    const { balance } = await driver.getBalance(this.toConfig(cfg));
     return { api: { id: cfg.id, name: cfg.name, type: cfg.provider, balance }, packages: result };
   }
 
@@ -255,14 +276,13 @@ export class IntegrationsService {
           mode: routing?.mode ?? 'manual',
           primaryProviderId: routing?.primaryProviderId ?? null,
           fallbackProviderId: routing?.fallbackProviderId ?? null,
-          providerType: routing?.providerType ?? 'manual',   // ← جديد
-          codeGroupId: routing?.codeGroupId ?? null,         // ← جديد
+          providerType: routing?.providerType ?? 'manual',
+          codeGroupId: routing?.codeGroupId ?? null,
         },
         providers: providerCosts,
       };
     });
 
-    // ✅ هذا هو مكان الـ return الذي سألت عنه
     return {
       providers: providers.map((p) => ({ id: p.id, name: p.name, type: p.provider })),
       codeGroups: groups.map((g) => ({
@@ -308,10 +328,7 @@ export class IntegrationsService {
     };
   }
 
-  /** جلب/تحديث تكلفة الباقة لدى مزوّد محدد (باستخدام mapping).
-   *  - إن لم يوجد ربط -> رسالة للمستخدم ليربط الباقة في إعدادات API.
-   *  - إن وُجد -> نجلب قائمة منتجات المزود، ونجد الباقة المطابقة، ونحدّث PackageCost.
-   */
+  /** جلب/تحديث تكلفة الباقة لدى مزوّد محدد (باستخدام mapping). */
   async refreshProviderCost(packageId: string, providerId: string) {
     const pkg = await this.packageRepo.findOne({
       where: { id: packageId },
@@ -338,11 +355,10 @@ export class IntegrationsService {
       };
     }
 
-    // اختر الدرايفر وصِل للأسعار
     const driver = this.driverOf(provider);
 
     // نجلب كل المنتجات من المزود ونبحث عن externalId الذي يطابق الربط
-    const products: NormalizedProduct[] = await driver.listProducts(provider);
+    const products: NormalizedProduct[] = await driver.listProducts(this.toConfig(provider));
     const providerPkg = products.find(
       (p) => String(p.externalId) === String(mapping.provider_package_id),
     );
@@ -405,7 +421,7 @@ export class IntegrationsService {
     return { ok: true };
   }
 
-    // تحديث مزود
+  // تحديث مزود
   async updateIntegration(
     id: string,
     dto: {
@@ -423,31 +439,31 @@ export class IntegrationsService {
   }
 
   async setRoutingProviderType(packageId: string, providerType: 'manual'|'external'|'internal_codes') {
-  const pkg = await this.packageRepo.findOne({ where: { id: packageId } });
-  if (!pkg) throw new NotFoundException('Package not found');
+    const pkg = await this.packageRepo.findOne({ where: { id: packageId } });
+    if (!pkg) throw new NotFoundException('Package not found');
 
-  let row = await this.routingRepo.findOne({ where: { package: { id: pkg.id } as any }, relations: ['package'] });
-  if (!row) row = this.routingRepo.create({ package: pkg, mode: 'manual' as any });
+    let row = await this.routingRepo.findOne({ where: { package: { id: pkg.id } as any }, relations: ['package'] });
+    if (!row) row = this.routingRepo.create({ package: pkg, mode: 'manual' as any });
 
-  row.providerType = providerType as any;
+    row.providerType = providerType as any;
 
-  // عند التحويل لـ manual ننظّف المزوّدين
-  if (providerType === 'manual') {
-    row.mode = 'manual' as any;
-    row.primaryProviderId = null;
-    row.fallbackProviderId = null;
-    row.codeGroupId = null;
+    // عند التحويل لـ manual ننظّف المزوّدين
+    if (providerType === 'manual') {
+      row.mode = 'manual' as any;
+      row.primaryProviderId = null;
+      row.fallbackProviderId = null;
+      row.codeGroupId = null;
+    }
+
+    await this.routingRepo.save(row);
+    return { packageId, routing: {
+      mode: row.mode,
+      providerType: row.providerType,
+      primaryProviderId: row.primaryProviderId,
+      fallbackProviderId: row.fallbackProviderId,
+      codeGroupId: row.codeGroupId ?? null,
+    }};
   }
-
-  await this.routingRepo.save(row);
-  return { packageId, routing: {
-    mode: row.mode,
-    providerType: row.providerType,
-    primaryProviderId: row.primaryProviderId,
-    fallbackProviderId: row.fallbackProviderId,
-    codeGroupId: row.codeGroupId ?? null,
-  }};
-}
 
   async setRoutingType(packageId: string, providerType: 'manual' | 'external' | 'internal_codes') {
     const pkg = await this.packageRepo.findOne({ where: { id: packageId } });
@@ -512,5 +528,4 @@ export class IntegrationsService {
       },
     };
   }
-
 }
