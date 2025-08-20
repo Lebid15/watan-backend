@@ -1274,7 +1274,7 @@ async createOrder(data: {
       status as any,
       {
         deltaAmountUserCurrency: deltaUser || 0,
-        packageName: order.package?.name,
+        packageName: order.package?.name ?? undefined,
         userIdentifier: order.userIdentifier || undefined,
       },
     );

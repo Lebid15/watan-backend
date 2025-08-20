@@ -21,8 +21,8 @@ export class ProductPackage {
   publicCode: string | null;
 
   // اسم الباقة
-  @Column({ length: 160 })
-  name: string;
+  @Column({ type: 'varchar', length: 160, nullable: true })
+  name: string | null;
 
   // وصف الباقة (اختياري)
   @Column({ type: 'text', nullable: true })
