@@ -12,6 +12,8 @@ import {
   UseGuards,
   Req,
   InternalServerErrorException,
+  BadRequestException,
+  Query,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
@@ -23,10 +25,14 @@ import { PriceGroup } from './price-group.entity';
 import { AuthGuard } from '@nestjs/passport';
 import { configureCloudinary } from '../utils/cloudinary';
 
-// ❌ لا تنفّذ التهيئة على مستوى الملف
-// const cloudinary = configureCloudinary();
+function parseMoney(input?: any): number {
+  if (input == null) return 0;
+  const s = String(input).replace(/[^\d.,-]/g, '').replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
 
-// ✅ بديل: تهيئة كسولة وقت الاستخدام
+// تهيئة Cloudinary وقت الاستخدام
 function getCloud() {
   return configureCloudinary();
 }
@@ -38,16 +44,13 @@ export class ProductsController {
   // =====================================
   // 🔹 مجموعات الأسعار
   // =====================================
-
   @Get('price-groups')
   async getPriceGroups(): Promise<PriceGroup[]> {
     return this.productsService.getPriceGroups();
   }
 
   @Post('price-groups')
-  async createPriceGroup(
-    @Body() body: Partial<PriceGroup>,
-  ): Promise<PriceGroup> {
+  async createPriceGroup(@Body() body: Partial<PriceGroup>): Promise<PriceGroup> {
     return this.productsService.createPriceGroup(body);
   }
 
@@ -65,7 +68,6 @@ export class ProductsController {
   // =====================================
   // 🔹 المنتجات
   // =====================================
-
   @Get()
   async findAll(): Promise<any[]> {
     const products = await this.productsService.findAllWithPackages();
@@ -92,10 +94,7 @@ export class ProductsController {
   }
 
   @Put(':id')
-  async update(
-    @Param('id') id: string,
-    @Body() body: Partial<Product>,
-  ): Promise<Product> {
+  async update(@Param('id') id: string, @Body() body: Partial<Product>): Promise<Product> {
     return this.productsService.update(id, body);
   }
 
@@ -104,9 +103,7 @@ export class ProductsController {
     await this.productsService.delete(id);
     return { message: 'تم حذف المنتج بنجاح' };
   }
-
-  // =====================================
-  // 🔹 رفع صورة المنتج إلى Cloudinary (بدون تخزين محلي)
+  // 🔹 رفع صورة المنتج إلى Cloudinary
   // =====================================
   @Post(':id/image')
   @UseInterceptors(
@@ -120,10 +117,7 @@ export class ProductsController {
       },
     }),
   )
-  async uploadProductImage(
-    @Param('id') id: string,
-    @UploadedFile() file: Express.Multer.File,
-  ) {
+  async uploadProductImage(@Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
     if (!file) throw new NotFoundException('لم يتم تقديم ملف (image)');
 
     try {
@@ -131,10 +125,7 @@ export class ProductsController {
       const result: any = await new Promise((resolve, reject) => {
         const upload = cloudinary.uploader.upload_stream(
           { folder: 'products', resource_type: 'image' },
-          (error, uploadResult) => {
-            if (error) return reject(error);
-            return resolve(uploadResult);
-          },
+          (error, uploadResult) => (error ? reject(error) : resolve(uploadResult)),
         );
         upload.end(file.buffer);
       });
@@ -144,7 +135,6 @@ export class ProductsController {
       }
       return this.productsService.updateImage(id, result.secure_url);
     } catch (err: any) {
-      // eslint-disable-next-line no-console
       console.error('[Upload Product Image] Cloudinary error:', {
         message: err?.message,
         name: err?.name,
@@ -155,13 +145,13 @@ export class ProductsController {
   }
 
   // =====================================
-  // 🔹 إنشاء باقة جديدة مع رفع صورة (Cloudinary)
+  // 🔹 إنشاء باقة جديدة مع رفع صورة + تمرير السعر
   // =====================================
   @Post(':id/packages')
   @UseInterceptors(
     FileInterceptor('image', {
       storage: memoryStorage(),
-      limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+      limits: { fileSize: 10 * 1024 * 1024 },
       fileFilter: (_req, file, cb) => {
         const ok = /^image\/(png|jpe?g|webp|gif|bmp|svg\+xml)$/i.test(file.mimetype);
         if (!ok) return cb(new Error('Only image files are allowed'), false);
@@ -173,6 +163,9 @@ export class ProductsController {
     @Param('id') productId: string,
     @UploadedFile() file: Express.Multer.File,
     @Body('name') name: string,
+    @Body('capital') capitalStr?: string,
+    @Body('basePrice') basePriceStr?: string,
+    @Body('price') priceStr?: string,
   ): Promise<ProductPackage> {
     if (!name) throw new NotFoundException('اسم الباقة مطلوب');
 
@@ -183,16 +176,12 @@ export class ProductsController {
         const result: any = await new Promise((resolve, reject) => {
           const upload = cloudinary.uploader.upload_stream(
             { folder: 'packages', resource_type: 'image' },
-            (error, uploadResult) => {
-              if (error) return reject(error);
-              return resolve(uploadResult);
-            },
+            (error, uploadResult) => (error ? reject(error) : resolve(uploadResult)),
           );
           upload.end(file.buffer);
         });
         imageUrl = result.secure_url;
       } catch (err: any) {
-        // eslint-disable-next-line no-console
         console.error('[Add Package Image] Cloudinary error:', {
           message: err?.message,
           name: err?.name,
@@ -202,9 +191,12 @@ export class ProductsController {
       }
     }
 
+    const capital = parseMoney(capitalStr ?? basePriceStr ?? priceStr);
+
     return this.productsService.addPackageToProduct(productId, {
       name,
       imageUrl,
+      capital,
     });
   }
 
@@ -217,16 +209,50 @@ export class ProductsController {
   @Put('packages/:id/prices')
   async updatePackagePrices(
     @Param('id') packageId: string,
-    @Body()
-    body: { capital: number; prices: { groupId: string; price: number }[] },
+    @Body() body: { capital: number; prices: { groupId: string; price: number }[] },
   ) {
-    return this.productsService.updatePackagePrices(packageId, body);
+    await this.productsService.updatePackagePrices(packageId, body);
+    const rows = await this.productsService.getPackagesPricesBulk({ packageIds: [packageId] });
+    return {
+      packageId,
+      capital: body.capital,
+      prices: rows.map(r => ({
+        id: r.priceId ?? null,
+        groupId: r.groupId,
+        groupName: r.groupName,
+        price: r.price
+      })),
+    };
   }
 
   // =====================================
-  // 🔹 واجهات للمستخدم (JWT)
+  // 🔹 جلب أسعار باقات متعددة (Bulk)
   // =====================================
 
+  // ✅ المسار المعتمد لتفادي طول الرابط
+  @Post('packages/prices')
+  async getPackagesPricesBulk(@Body() body: { packageIds: string[]; groupId?: string }, @Req() _req: any) {
+    return this.productsService.getPackagesPricesBulk(body);
+  }
+
+  // ⛔ اختياري: استعمله فقط للاستعلامات القصيرة (قد يسبب طول رابط)
+  @Get('packages/prices')
+  async getPackagesPricesQuery(
+    @Query('packageIds') packageIds: string,
+    @Query('groupId') groupId?: string,
+  ) {
+    if (!packageIds) throw new BadRequestException('packageIds مطلوب');
+
+    const ids = packageIds
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 1000);
+    const rows = await this.productsService.getPackagesPricesBulk({ packageIds: ids, groupId });
+    return rows;
+  }
+  // 🔹 واجهات للمستخدم (JWT)
+  // =====================================
   @UseGuards(AuthGuard('jwt'))
   @Get('user')
   async getAllForUser(@Req() req) {

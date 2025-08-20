@@ -63,6 +63,54 @@ export class ZnetProvider implements ProviderDriver {
     return products;
   }
 
+    /**
+   * يرجع كتالوج موحّد الشكل ليستعمله CatalogImportService
+   * كل عنصر = باقة (package) ضمن منتج (product)
+   */
+  async fetchCatalog(cfg: IntegrationConfig): Promise<Array<{
+    productExternalId: string;
+    productName: string;
+    productImageUrl?: string | null;
+    packageExternalId: string;
+    packageName: string;
+    costPrice?: number | string | null;
+    currencyCode?: string | null;
+  }>> {
+    // نستفيد من listProducts الموجودة لديك (كل عنصر فيها باقة)
+    const items = await this.listProducts(cfg);
+
+    // ملاحظة: في ZNET غالبًا oyun_bilgi_id تمثل تعريف اللعبة (المنتج)
+    // و externalId يمثل تعريف الباقة (الكُوبور).
+    return items.map((p) => {
+      const meta = (p as any)?.meta ?? {};
+      const productExternalId =
+        (meta.oyun_bilgi_id && String(meta.oyun_bilgi_id)) ||
+        (p.category && String(p.category)) ||               // fallback لو ما توفر oyun_bilgi_id
+        String(p.externalId);                               // آخر حل
+
+      const productName =
+        (p.category && String(p.category)) ||               // اسم اللعبة إن توفّر
+        String(p.name);                                     // وإلا اسم الباقة
+
+      const packageExternalId = String(p.externalId);
+      const packageName = String(p.name);
+
+      // في ZNET الأسعار بالليرة عادةً؛ إن كان عندك عملة ضمن cfg، مررها؛ وإلا TRY
+      const costPrice = p.basePrice ?? null;
+      const currencyCode = 'TRY';
+
+      return {
+        productExternalId,
+        productName,
+        productImageUrl: null, // لا يوجد رابط صورة من listProducts حالياً
+        packageExternalId,
+        packageName,
+        costPrice,
+        currencyCode,
+      };
+    });
+  }
+
   async placeOrder(
     cfg: IntegrationConfig,
     dto: { productId: string; qty: number; params: Record<string, any>; clientOrderUuid?: string }

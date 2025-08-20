@@ -112,6 +112,16 @@ export class ProductsService {
       'processing';
 
     const extStatus = this.normalizeExternalStatus(statusRaw);
+    console.log('[SERVICE syncExternal] provider reply', {
+    orderId: order.id,
+    providerId: order.providerId,
+    externalOrderId: order.externalOrderId,
+    mapped: statusRaw,
+    normalized: extStatus,
+    note: first?.note || first?.raw?.message || first?.raw?.desc || null,
+    pin: first?.pin || first?.raw?.pin || null,
+  });
+
 
     // التقاط note/pin
     const note: string | undefined =
@@ -145,21 +155,41 @@ export class ProductsService {
 
     // إن كانت نهائية احسب الإتمام
     const isTerminal = extStatus === 'done' || extStatus === 'failed';
+
     if (isTerminal) {
       order.completedAt = new Date();
-      order.durationMs = order.sentAt ? (order.completedAt.getTime() - order.sentAt.getTime()) : 0;
-    }
+      order.durationMs = order.sentAt
+        ? order.completedAt.getTime() - order.sentAt.getTime()
+        : 0;
+      await this.ordersRepo.save(order);
 
-    await this.ordersRepo.save(order);
-
-    // تحديث الحالة الداخلية لو نهائي
-    if (isTerminal && !alreadyTerminal) {
       if (extStatus === 'done') {
         await this.updateOrderStatus(order.id, 'approved');
       } else {
-        await this.updateOrderStatus(order.id, 'rejected');
+        // extStatus === 'failed'
+        const routing = await this.routingRepo.findOne({
+          where: { package: { id: order.package.id } as any },
+          relations: ['package'],
+        });
+
+        const isOnFallback =
+          routing?.fallbackProviderId &&
+          order.providerId === routing.fallbackProviderId;
+        const hasFallback = !!routing?.fallbackProviderId;
+
+        if (isOnFallback || !hasFallback) {
+          // نحن على المزوّد الثاني أو لا يوجد مزوّد آخر → رفض نهائي
+          await this.updateOrderStatus(order.id, 'rejected');
+        } else {
+          // نحن على المزوّد الأساسي ويوجد بديل
+          // هنا ممكن يا إمّا تترك المونيتور يلتقط الحالة
+          // أو تستدعي tryOnce(routing.fallbackProviderId) الآن
+          // حسب اختيارك
+        }
       }
+
     }
+
 
     // لوج
     await this.logsRepo.save(
@@ -314,6 +344,12 @@ export class ProductsService {
     productId: string,
     data: Partial<ProductPackage>,
   ): Promise<ProductPackage> {
+    console.log('[SERVICE addPackageToProduct] productId =', productId, 'data =', {
+      name: data?.name,
+      capital: data?.capital ?? data?.basePrice ?? 0,
+      hasImage: !!data?.imageUrl,
+    });
+
     if (!data.name || !data.name.trim()) {
       throw new ConflictException('اسم الباقة مطلوب');
     }
@@ -322,7 +358,6 @@ export class ProductsService {
       where: { id: productId },
       relations: ['packages'],
     });
-
     if (!product) throw new NotFoundException('لم يتم العثور على المنتج');
 
     const initialCapital = data.capital ?? data.basePrice ?? 0;
@@ -351,9 +386,15 @@ export class ProductsService {
     await this.packagePriceRepo.save(prices);
     savedPackage.prices = prices;
 
+    console.log('[SERVICE addPackageToProduct] created package =', {
+      id: savedPackage.id,
+      pricesCount: prices.length,
+    });
+
     return savedPackage;
   }
 
+  /** ✅ حذف باقة (مع أسعارها) */
   async deletePackage(id: string): Promise<void> {
     const pkg = await this.packagesRepo.findOne({
       where: { id },
@@ -361,12 +402,16 @@ export class ProductsService {
     });
     if (!pkg) throw new NotFoundException('لم يتم العثور على الباقة');
 
-    if (pkg.prices.length) {
+    const pricesCount = Array.isArray(pkg.prices) ? pkg.prices.length : 0;
+    if (pricesCount) {
       await this.packagePriceRepo.remove(pkg.prices);
     }
+
     await this.packagesRepo.remove(pkg);
+    console.log('[SERVICE deletePackage] done');
   }
 
+  /** ✅ تحديث رأس المال وأسعار الباقة لكل مجموعة */
   async updatePackagePrices(
     packageId: string,
     data: { capital: number; prices: { groupId: string; price: number }[] },
@@ -377,17 +422,25 @@ export class ProductsService {
     });
     if (!pkg) throw new NotFoundException('لم يتم العثور على الباقة');
 
+    console.log('[SERVICE updatePackagePrices] current prices =', pkg?.prices?.length ?? 0, 'payload =', {
+      capital: data?.capital,
+      pricesCount: Array.isArray(data?.prices) ? data.prices.length : 0,
+    });
+
     pkg.capital = data.capital;
     pkg.basePrice = data.capital;
     await this.packagesRepo.save(pkg);
 
-    for (const p of data.prices) {
-      let priceEntity = pkg.prices.find(
-        (price) => price.priceGroup.id === p.groupId,
+    for (const p of data.prices || []) {
+      let priceEntity = (pkg.prices || []).find(
+        (price) => price.priceGroup?.id === p.groupId,
       );
 
       const priceGroup = await this.priceGroupsRepo.findOne({ where: { id: p.groupId } });
-      if (!priceGroup) continue;
+      if (!priceGroup) {
+        console.warn('[SERVICE updatePackagePrices] price group not found =>', p.groupId);
+        continue;
+      }
 
       if (!priceEntity) {
         priceEntity = this.packagePriceRepo.create({
@@ -401,8 +454,32 @@ export class ProductsService {
 
       await this.packagePriceRepo.save(priceEntity);
     }
-
     return { message: 'تم تحديث أسعار الباقة ورأس المال بنجاح' };
+  }
+
+  /** ✅ جلب أسعار باقات متعددة */
+  async getPackagesPricesBulk(body: { packageIds: string[]; groupId?: string }) {
+    if (!Array.isArray(body.packageIds) || body.packageIds.length === 0) {
+      throw new BadRequestException('packageIds مطلوب');
+    }
+
+    const ids = body.packageIds.slice(0, 1000);
+
+    const rows = await this.packagePriceRepo.find({
+      where: { package: { id: In(ids) } as any },
+      relations: ['package', 'priceGroup'],
+    });
+
+    const filtered = body.groupId
+      ? rows.filter((p) => p.priceGroup?.id === body.groupId)
+      : rows;
+    return filtered.map((p) => ({
+      packageId: p.package.id,
+      groupId: p.priceGroup.id,
+      groupName: p.priceGroup.name,
+      priceId: p.id,
+      price: Number(p.price) || 0,
+    }));
   }
 
   // ================== التسعير الأساس (بالدولار) ==================
@@ -581,7 +658,7 @@ export class ProductsService {
         (placed as any)?.mappedStatus ||
         'sent'
       ).slice(0, 250);
-
+      order.attempts = (order.attempts ?? 0) + 1;
       await this.ordersRepo.save(order);
 
       await this.logsRepo.save(
@@ -597,7 +674,7 @@ export class ProductsService {
       if (order.externalStatus === 'done') {
         await this.updateOrderStatus(order.id, 'approved');
       } else if (order.externalStatus === 'failed') {
-        await this.updateOrderStatus(order.id, 'rejected');
+        throw new Error('primary dispatch failed (mapped as failed)');
       }
     };
 
@@ -615,21 +692,35 @@ export class ProductsService {
       );
     }
 
-    if (routing.fallbackProviderId) {
-      try {
-        await tryOnce(routing.fallbackProviderId);
-        return;
-      } catch (err: any) {
-        await this.logsRepo.save(
-          this.logsRepo.create({
+      // بعد تسجيل الفشل للـ primary
+      if (routing.fallbackProviderId) {
+        try {
+          await tryOnce(routing.fallbackProviderId);
+          return;
+        } catch (err2: any) {
+          await this.logsRepo.save(this.logsRepo.create({
             order,
             action: 'dispatch',
             result: 'fail',
-            message: String(err?.message || 'failed to dispatch (fallback)').slice(0, 250),
-          }),
-        );
+            message: String(err2?.message || 'failed to dispatch (fallback)').slice(0, 250),
+          }));
+          // ✅ هنا القرار النهائي: رفض
+          order.externalStatus = 'failed' as any;
+          order.completedAt = new Date();
+          order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : 0;
+          await this.ordersRepo.save(order);
+          await this.updateOrderStatus(order.id, 'rejected'); // ← نغلق الطلب كمرفوض
+          return;
+        }
       }
-    }
+
+      // لا primary ولا fallback نجحوا → (كان Manualize) الآن نخليها رفض لو الـ primary رجّع failed صريح
+      order.externalStatus = 'failed' as any;
+      order.completedAt = new Date();
+      order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : 0;
+      await this.ordersRepo.save(order);
+      await this.updateOrderStatus(order.id, 'rejected');
+
   }
   
   // ================ الطلبات =============
@@ -703,6 +794,18 @@ async createOrder(data: {
       });
 
       const saved = await ordersRepo.save(order);
+      console.log('[SERVICE createOrder] created order', {
+      orderId: saved.id,
+      userId: user.id,
+      packageId: pkg.id,
+      qty: quantity,
+      unitPriceUSD,
+      totalUSD,
+      userCurrency: code,
+      totalUser,
+      balanceAfter: user.balance,
+    });
+
 
       // ❌ لا نُرسل إشعار خصم هنا (سنرسل إشعارًا موحّدًا عند القبول/الرفض)
       // await this.notifications.walletDebit(user.id, totalUser, saved.id, {
@@ -734,7 +837,6 @@ async createOrder(data: {
     try {
       await this.tryAutoDispatch(created.entityId);
     } catch (e) {
-      // يبقى الطلب pending
     }
 
     return created.view;
@@ -1094,6 +1196,13 @@ async createOrder(data: {
     }
 
     const prevStatus = order.status;
+    console.log('[SERVICE updateOrderStatus] change', {
+    orderId: orderId,
+    prevStatus,
+    nextStatus: status,
+    userId: order.user?.id,
+  });
+
     const user = order.user;
 
     const rate = user?.currency ? Number(user.currency.rate) : 1;
@@ -1129,6 +1238,11 @@ async createOrder(data: {
 
     order.status = status;
     const saved = await this.ordersRepo.save(order);
+    console.log('[SERVICE updateOrderStatus] saved', {
+    orderId: saved.id,
+    status: saved.status,
+  });
+
 
     if (status === 'approved') {
       try { await this.freezeFxOnApprovalIfNeeded(saved.id); } catch {}

@@ -5,7 +5,8 @@ import {
 } from '@nestjs/common';
 import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
-import { UpdateUserDto, UserRole } from './dto/update-user.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
+import { UserRole } from '../auth/user-role.enum';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -53,8 +54,7 @@ export class UserController {
 
   @Get('with-price-group')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
-  @ApiBearerAuth()
+  @Roles(UserRole.ADMIN, UserRole.DEVELOPER)  // السماح لكلا الدورين
   async findAllWithPriceGroup() {
     return this.userService.findAllWithPriceGroup();
   }
@@ -137,7 +137,7 @@ export class UserController {
 
   @Patch(':id/price-group')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.DEVELOPER)  // السماح لكلا الدورين
   @ApiBearerAuth()
   async updatePriceGroup(
     @Param('id', ParseUUIDPipe) userId: string,

@@ -1,3 +1,4 @@
+// products/price-groups.service.ts
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -9,36 +10,32 @@ export class PriceGroupsService {
     @InjectRepository(PriceGroup)
     private readonly priceGroupRepo: Repository<PriceGroup>,
   ) {}
-
-  // ✅ إرجاع كل مجموعات الأسعار
   async findAll(): Promise<PriceGroup[]> {
-    return this.priceGroupRepo.find();
+    const groups = await this.priceGroupRepo.find();
+    return groups;
   }
-
-  // ✅ إنشاء مجموعة جديدة
   async create(data: Partial<PriceGroup>): Promise<PriceGroup> {
     const group = this.priceGroupRepo.create(data);
-    return await this.priceGroupRepo.save(group);
+    const saved = await this.priceGroupRepo.save(group);
+    return saved;
   }
-
-  // ✅ تحديث مجموعة حسب ID
   async update(id: string, data: Partial<PriceGroup>): Promise<PriceGroup | null> {
     const group = await this.priceGroupRepo.findOne({ where: { id } });
-    if (!group) return null;
+    if (!group) {
+      return null;
+    }
     Object.assign(group, data);
-    return await this.priceGroupRepo.save(group);
+    const saved = await this.priceGroupRepo.save(group);
+    return saved;
   }
-
-  // ✅ حذف مجموعة ويعيد true/false حسب نجاح العملية
   async remove(id: string): Promise<boolean> {
     const result = await this.priceGroupRepo.delete(id);
     return (result.affected ?? 0) > 0;
   }
-
-  // ✅ دالة جديدة: جلب مجموعات الأسعار مع المستخدمين المرتبطين
   async getUsersPriceGroups(): Promise<PriceGroup[]> {
-    return this.priceGroupRepo.find({
-      relations: ['users'], // تأكد أن entity PriceGroup فيه relation users
+    const groups = await this.priceGroupRepo.find({
+      relations: ['users'], 
     });
+    return groups;
   }
 }

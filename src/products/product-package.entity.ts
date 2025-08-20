@@ -21,7 +21,7 @@ export class ProductPackage {
   publicCode: string | null;
 
   // اسم الباقة
-  @Column({ length: 100 })
+  @Column({ length: 160 })
   name: string;
 
   // وصف الباقة (اختياري)

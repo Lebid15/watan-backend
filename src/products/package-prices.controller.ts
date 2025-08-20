@@ -40,7 +40,7 @@ export class PackagePricesController {
     if (!isUuid(id)) {
       throw new BadRequestException('معرّف الباقة غير صالح');
     }
-
+    
     // ✅ جلب الباقة
     const pkg = await this.packageRepo.findOne({ where: { id } });
     if (!pkg) throw new NotFoundException('الباقة غير موجودة');
@@ -79,13 +79,10 @@ export class PackagePricesController {
         }),
       );
     }
-
-    // ✅ إرجاع الباقة مع الأسعار بعد التحديث
     const updatedPrices = await this.priceRepo.find({
       where: { package: { id: pkg.id } },
       relations: ['priceGroup'],
     });
-
     return {
       success: true,
       packageId: pkg.id,

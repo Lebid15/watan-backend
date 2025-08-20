@@ -17,17 +17,13 @@ import { ProductPackage } from '../products/product-package.entity';
 import { PackageRouting } from './package-routing.entity';
 import { PackageCost } from './package-cost.entity';
 
-// ✅ كيانات الأكواد (مطلوبة للـ Repositories)
+// ✅ كيانات الأكواد
 import { CodeGroup } from '../codes/entities/code-group.entity';
 import { CodeItem } from '../codes/entities/code-item.entity';
-
-// (اختياري) إذا كنت تحقن CodesService في أي مكان داخل هذا الموديول
-// import { CodesModule } from '../codes/codes.module';
 
 @Module({
   imports: [
     HttpModule,
-    // CodesModule, // ← فكّ التعليق إذا كنت تحتاج CodesService كمزوّد
     TypeOrmModule.forFeature([
       Integration,
       PackageMapping,
@@ -35,7 +31,7 @@ import { CodeItem } from '../codes/entities/code-item.entity';
       ProductPackage,
       PackageRouting,
       PackageCost,
-      CodeGroup,        
+      CodeGroup,
       CodeItem,
     ]),
   ],

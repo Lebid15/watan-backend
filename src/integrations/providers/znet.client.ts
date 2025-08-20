@@ -16,16 +16,17 @@ export class ZnetClient {
   async getRaw(baseUrl: string, path: string, query: Record<string, string | number | undefined>) {
     const url = this.buildUrl(baseUrl, path, query);
     const { data } = await firstValueFrom(this.http.get(url, { responseType: 'text' as any }));
-  return data;
+    return data;
   }
 
-    async getJson(baseUrl: string, path: string, query: Record<string, string | number | undefined>) {
+  async getJson(baseUrl: string, path: string, query: Record<string, string | number | undefined>) {
     const text = await this.getRaw(baseUrl, path, query);
     try {
-        return JSON.parse(String(text));
+      return JSON.parse(String(text));
     } catch {
-        throw new Error(`Non-JSON response from Znet for ${path}.php (check baseUrl/IP/auth). Raw: ${String(text).slice(0,200)}`);
+      throw new Error(
+        `Non-JSON response from Znet for ${path}.php (check baseUrl/IP/auth). Raw: ${String(text).slice(0, 200)}`
+      );
     }
-    }
-
+  }
 }
