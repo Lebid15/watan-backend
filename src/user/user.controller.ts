@@ -16,6 +16,7 @@ import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam } from '@ne
 
 @ApiTags('Users')
 @Controller('users')
+@UseGuards(JwtAuthGuard, RolesGuard)
 export class UserController {
   constructor(private readonly userService: UserService) {}
 
@@ -53,18 +54,18 @@ export class UserController {
   }
 
   @Get('with-price-group')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.DEVELOPER)  // السماح لكلا الدورين
+  @Roles(UserRole.ADMIN, UserRole.DEVELOPER)
   async findAllWithPriceGroup() {
     return this.userService.findAllWithPriceGroup();
   }
 
   @Get()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.DEVELOPER)
   @ApiBearerAuth()
-  async findAll() {
-    const users = await this.userService.findAllUsers();
+  async findAll(@Req() req) {
+    const where = req.user?.role === 'admin' ? { adminId: req.user.id } : {};
+
+    const users = await this.userService.findAllUsers(where);
     return users.map(user => ({
       id: user.id,
       email: user.email,
@@ -89,7 +90,6 @@ export class UserController {
   }
 
   @Get(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   @ApiParam({ name: 'id', description: 'UUID of the user to retrieve' })
@@ -113,7 +113,6 @@ export class UserController {
   }
 
   @Put(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update user data (Admin only)' })
@@ -128,7 +127,6 @@ export class UserController {
   }
 
   @Delete(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   async deleteUser(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
@@ -136,8 +134,7 @@ export class UserController {
   }
 
   @Patch(':id/price-group')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.DEVELOPER)  // السماح لكلا الدورين
+  @Roles(UserRole.ADMIN, UserRole.DEVELOPER)
   @ApiBearerAuth()
   async updatePriceGroup(
     @Param('id', ParseUUIDPipe) userId: string,
@@ -148,9 +145,7 @@ export class UserController {
 
   // ====== المسارات الجديدة للوحة المشرف ======
 
-  // تفعيل/تعطيل
   @Patch(':id/active')
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   async setActive(
@@ -160,9 +155,7 @@ export class UserController {
     return this.userService.setActive(id, !!isActive);
   }
 
-  // إضافة رصيد (+)
   @Patch(':id/balance/add')
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   async addFunds(
@@ -172,9 +165,7 @@ export class UserController {
     return this.userService.addFunds(id, Number(amount));
   }
 
-  // حد السالب
   @Patch(':id/overdraft')
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   async setOverdraft(
@@ -185,15 +176,17 @@ export class UserController {
   }
 
   @Patch(':id/password')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.DEVELOPER)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Admin: set user password' })
+  @ApiOperation({ summary: 'Admin/Dev: set user password' })
   async adminSetPassword(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AdminSetPasswordDto,
   ) {
-    return this.userService.setPassword(id, dto.password);
+    if (!dto?.password || dto.password.length < 6) {
+      throw new BadRequestException('Password too short');
+    }
+    return this.userService.adminSetPassword(id, dto.password);
   }
 
 }

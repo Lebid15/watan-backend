@@ -8,6 +8,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { PriceGroup } from '../products/price-group.entity';
 import { Currency } from '../currencies/currency.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { FindOptionsWhere } from 'typeorm';
 
 @Injectable()
 export class UserService {
@@ -59,8 +60,11 @@ export class UserService {
     return this.usersRepository.findOne({ where: { username }, relations });
   }
 
-  async findAllUsers(): Promise<User[]> {
-    return this.usersRepository.find({ relations: ['priceGroup', 'currency'] });
+  async findAllUsers(where: FindOptionsWhere<User> = {}): Promise<User[]> {
+    return this.usersRepository.find({
+      where,
+      relations: ['priceGroup', 'currency'],
+    });
   }
 
   async findById(id: string, relations: string[] = ['priceGroup', 'currency']): Promise<User | null> {
@@ -254,6 +258,21 @@ export class UserService {
       .leftJoinAndSelect('u.currency', 'currency')
       .where('u.id = :id', { id })
       .getOne();
+  }
+
+  async adminSetPassword(userId: string, plain: string) {
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    if (!plain || plain.length < 6) {
+      throw new BadRequestException('Password too short');
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(plain, salt);
+
+    await this.usersRepository.save(user);
+    return { ok: true };
   }
 
 }

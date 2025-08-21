@@ -1,3 +1,4 @@
+// src/user/user.entity.ts
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -14,6 +15,14 @@ import { Currency } from '../currencies/currency.entity';
 export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // 🔹 العلاقة مع المشرف
+  @Column({ type: 'uuid', nullable: true })
+  adminId?: string | null;
+
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'adminId' })
+  admin?: User | null;
 
   @Column({ unique: true })
   email: string;
@@ -42,15 +51,12 @@ export class User {
   @Column({ nullable: true })
   fullName: string;
 
-  // ✅ حالة التفعيل/التعطيل
   @Column({ type: 'boolean', default: true })
   isActive: boolean;
 
-  // ✅ حد السالب (يسمح بالسالب حتى هذا الحد، 0 = لا يسمح)
   @Column('decimal', { precision: 12, scale: 2, default: 0 })
   overdraftLimit: number;
 
-  // ✅ FK لمجموعة الأسعار
   @Column({ type: 'uuid', nullable: true })
   price_group_id?: string | null;
 
@@ -58,7 +64,6 @@ export class User {
   @JoinColumn({ name: 'price_group_id' })
   priceGroup?: PriceGroup | null;
 
-  // ✅ FK للعملة
   @Column({ type: 'uuid', nullable: true })
   currency_id?: string | null;
 
