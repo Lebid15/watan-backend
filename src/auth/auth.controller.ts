@@ -1,8 +1,10 @@
 // src/auth/auth.controller.ts
-import { Controller, Post, Body, BadRequestException, UnauthorizedException, UseGuards, Req } from '@nestjs/common';
+import { Controller, Post, Body, BadRequestException, UnauthorizedException, UseGuards, Req, ForbiddenException, ConflictException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { Tenant } from '../tenants/tenant.entity';
+import { User } from '../user/user.entity';
+import * as bcrypt from 'bcrypt';
 import { ApiTags, ApiBody, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { CreateUserDto } from '../user/dto/create-user.dto';
@@ -28,6 +30,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     @InjectRepository(Tenant) private readonly tenantsRepo: Repository<Tenant>,
+  @InjectRepository(User) private readonly usersRepo: Repository<User>,
   ) {}
 
   @Post('login')
@@ -57,6 +60,45 @@ export class AuthController {
 
     const { access_token } = await this.authService.login(user, tenantIdFromContext);
     return { token: access_token };
+  }
+
+  // ================= Developer Bootstrap Endpoint =================
+  // يسمح بإنشاء حساب مطوّر (tenantId NULL) مرة واحدة عبر سر بيئة BOOTSTRAP_DEV_SECRET.
+  // الاستخدام: POST /api/auth/bootstrap-developer { secret, email, password }
+  // الحماية:
+  //   - رفض إذا لم يُضبط السر في البيئة.
+  //   - رفض لو السر خطأ.
+  //   - رفض لو حساب بنفس البريد موجود (أي دور) أو أي مطوّر موجود (حتى لا ينشئ مهاجم آخر حسابًا).
+  @Post('bootstrap-developer')
+  @ApiOperation({ summary: 'إنشاء حساب مطوّر عالمي عبر سر بيئة (مرة واحدة)' })
+  @ApiBody({ schema: { properties: { secret: { type: 'string' }, email: { type: 'string' }, password: { type: 'string' } }, required: ['secret','email','password'] } })
+  async bootstrapDeveloper(@Body() body: { secret: string; email: string; password: string }) {
+    const envSecret = process.env.BOOTSTRAP_DEV_SECRET;
+    if (!envSecret) throw new ForbiddenException('Bootstrap disabled (no BOOTSTRAP_DEV_SECRET)');
+    if (!body?.secret || body.secret !== envSecret) throw new ForbiddenException('Invalid secret');
+    if (!body.email || !body.password) throw new BadRequestException('email & password required');
+    if (body.password.length < 6) throw new BadRequestException('Weak password');
+
+    // إن وجد أي مطوّر سابقًا نمنع الإنشاء (قابل للتعديل لو أردت السماح بعدم الحصر بالبريد)
+    const existingAnyDev = await this.usersRepo.findOne({ where: { role: 'developer', tenantId: IsNull() } });
+    if (existingAnyDev) throw new ConflictException('Developer already exists');
+
+    // رفض لو البريد مستخدم بأي سياق آخر
+    const existingEmail = await this.usersRepo.findOne({ where: { email: body.email } });
+    if (existingEmail) throw new ConflictException('Email already in use');
+
+    const hash = await bcrypt.hash(body.password, 10);
+  const user: any = this.usersRepo.create({
+      email: body.email,
+      password: hash,
+      role: 'developer',
+      tenantId: null,
+      isActive: true,
+      balance: 0,
+      overdraftLimit: 0,
+    } as any);
+  const saved = await this.usersRepo.save(user);
+  return { ok: true, id: saved.id, email: saved.email, role: saved.role };
   }
 
   @Post('register')
