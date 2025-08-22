@@ -73,6 +73,42 @@ async function bootstrap() {
   // ✅ احصل على DataSource قبل الاستماع لتطبيق الهجرات (مهم للإنتاج)
   const dataSource = app.get(DataSource);
   const autoMigrations = (process.env.AUTO_MIGRATIONS ?? 'true').toLowerCase() !== 'false';
+  // --- Preflight structural patch: أضف أعمدة tenantId المفقودة قبل أي استعلامات تعتمدها ---
+  try {
+    console.log('🧪 [Preflight] Checking tenantId columns existence...');
+    await dataSource.query(`
+      DO $$
+      BEGIN
+        -- users.tenantId
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'
+        ) THEN
+          ALTER TABLE "users" ADD COLUMN "tenantId" uuid NULL;
+      RAISE NOTICE 'Added users.tenantId';
+        END IF;
+        -- product_orders.tenantId
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='product_orders' AND column_name='tenantId'
+        ) THEN
+          ALTER TABLE "product_orders" ADD COLUMN "tenantId" uuid NULL;
+      RAISE NOTICE 'Added product_orders.tenantId';
+        END IF;
+      END$$;
+    `);
+    const usersHas = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'`);
+    const ordersHas = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='product_orders' AND column_name='tenantId'`);
+    console.log('🧪 [Preflight] users.tenantId exists?', usersHas[0]?.c === 1, 'product_orders.tenantId exists?', ordersHas[0]?.c === 1);
+    // تعبئة tenantId في الطلبات إن وجد المستخدم
+    await dataSource.query(`UPDATE "product_orders" o SET "tenantId" = u."tenantId" FROM "users" u WHERE o."userId" = u."id" AND o."tenantId" IS NULL;`);
+    const nullCount = await dataSource.query(`SELECT count(*)::int AS c FROM "product_orders" WHERE "tenantId" IS NULL`);
+    console.log('🧪 [Preflight] product_orders rows with tenantId NULL after fill:', nullCount[0]?.c);
+    // فهارس سريعة (إن لم تكن موجودة)
+    await dataSource.query(`CREATE INDEX IF NOT EXISTS "idx_users_tenant" ON "users" ("tenantId");`);
+    await dataSource.query(`CREATE INDEX IF NOT EXISTS "idx_orders_tenant" ON "product_orders" ("tenantId");`);
+    console.log('✅ [Preflight] Tenant columns/indices ensured');
+  } catch (e: any) {
+    console.warn('⚠️ Preflight tenant columns patch failed (يمكن تجاهله إن وُجدت الأعمدة):', e?.message || e);
+  }
   if (autoMigrations) {
     try {
       const ran = await dataSource.runMigrations();
