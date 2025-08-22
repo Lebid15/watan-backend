@@ -161,6 +161,48 @@ export class CatalogImportService {
     };
   }
 
+  /**
+   * استيراد كتالوج مزود مطوّر (scope=dev) إلى تينانت محدد:
+   * 1) التأكد من أن المزود scope=dev
+   * 2) إن لم يكن هناك نسخة Tenant للمزوّد بنفس provider + name نُنشئ واحدة (scope=tenant)
+   * 3) تشغيل importProvider بالـ tenantId الجديد والـ id الخاص بنسخة التينانت
+   */
+  async importDevProviderIntoTenant(devProviderId: string, tenantId: string) {
+    if (!tenantId) throw new BadRequestException('tenantId required');
+    const devProvider = await this.resolveProvider(devProviderId, null);
+    if ((devProvider as any).scope !== 'dev') {
+      throw new BadRequestException('Source provider is not scope=dev');
+    }
+
+    // هل هناك نسخة Tenant موجودة سلفاً؟ نطابق بالاسم و provider type
+    let tenantCopy: Integration | null = await this.integrationsRepo.findOne({
+      where: {
+        tenantId,
+        provider: (devProvider as any).provider,
+        name: (devProvider as any).name,
+        scope: 'tenant' as any,
+      } as any,
+    });
+
+    if (!tenantCopy) {
+      const created = this.integrationsRepo.create({
+        tenantId,
+        scope: 'tenant' as any,
+        provider: (devProvider as any).provider,
+        name: (devProvider as any).name,
+        baseUrl: (devProvider as any).baseUrl ?? null,
+        apiToken: (devProvider as any).apiToken ?? null,
+        kod: (devProvider as any).kod ?? null,
+        sifre: (devProvider as any).sifre ?? null,
+      } as Partial<Integration> as Integration);
+      tenantCopy = await this.integrationsRepo.save(created);
+    }
+
+    // استيراد الكتالوج باستخدام نسخة التينانت
+  const importRes = await this.importProvider(tenantId, (tenantCopy as Integration).id);
+  return { tenantIntegrationId: (tenantCopy as Integration).id, ...importRes };
+  }
+
   private buildPublicCode(): string {
     return randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase();
   }

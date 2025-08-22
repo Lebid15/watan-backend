@@ -89,16 +89,37 @@ export class ProvidersAdminController {
 
   /** الاستيراد من مزوّد مطوّر محدد */
   @Post(':providerId/catalog-import')
-  @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
-  async importProviderCatalog(@Req() _req: any, @Param('providerId') providerId: string) {
-    // get قد يتطلب tenantId — dev → null
-    const integ = await this.integrations.get(providerId, null);
-    if (!integ || (integ as any).scope !== 'dev') {
-      throw new BadRequestException('Provider must be scope=dev');
+  @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER, UserRole.ADMIN)
+  async importProviderCatalog(@Req() req: any, @Param('providerId') providerId: string) {
+    const role = req.user?.role;
+    const tenantId: string | null = req.tenant?.id ?? req.user?.tenantId ?? null;
+
+    // المطوّر / مالك المنصة: يستورد إلى نطاق dev (بدون tenantId)
+    if (role === 'developer' || role === 'instance_owner') {
+      const integ = await this.integrations.get(providerId, null);
+      if (!integ || (integ as any).scope !== 'dev') {
+        throw new BadRequestException('Provider must be scope=dev');
+      }
+      const res = await this.catalogImport.importProvider(null, providerId);
+      return { ok: true, providerId, scope: 'dev', ...res };
     }
-    // CatalogImportService.importProvider يتطلب (tenantId, providerId) — dev → null
-    const res = await this.catalogImport.importProvider(null, providerId);
-    return { ok: true, providerId, ...res };
+
+    // مسؤول التينانت: يستورد نسخة من مزوّد المطوّر إلى تينانته
+    if (role === 'admin') {
+      if (!tenantId) throw new BadRequestException('Tenant context missing');
+      // نحاول أولاً جلبه كمزوّد مطوّر
+      let integ: any;
+      try { integ = await this.integrations.get(providerId, null); } catch { /* ignore */ }
+      if (!integ || integ.scope !== 'dev') {
+        // لو لم يكن dev ربما هو مزود Tenant بالفعل فنستورد مباشرةً في نطاق التينانت
+        const res = await this.catalogImport.importProvider(tenantId, providerId);
+        return { ok: true, providerId, scope: 'tenant', ...res };
+      }
+      const res = await this.catalogImport.importDevProviderIntoTenant(providerId, tenantId);
+      return { ok: true, providerId, scope: 'tenant', ...res };
+    }
+
+    throw new BadRequestException('Unsupported role for import');
   }
 
   // ================== مزوّدو التينانت (scope = 'tenant') ==================
