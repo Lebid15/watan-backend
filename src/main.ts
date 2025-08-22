@@ -28,6 +28,17 @@ import * as bcrypt from 'bcrypt';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Debug presence of developer bootstrap secret (length only) - remove later
+  if (process.env.BOOTSTRAP_DEV_SECRET) {
+    console.log('[DEBUG] BOOTSTRAP_DEV_SECRET detected (length=%d)', process.env.BOOTSTRAP_DEV_SECRET.length);
+  } else {
+    console.log('[DEBUG] BOOTSTRAP_DEV_SECRET NOT set');
+  }
+  // List all BOOTSTRAP* env var names for diagnostics (لا تطبع القيم السرية)
+  try {
+    const bootstrapKeys = Object.keys(process.env).filter(k => k.startsWith('BOOTSTRAP'));
+    console.log('[DEBUG] BOOTSTRAP* keys =', bootstrapKeys);
+  } catch {}
 
   // ✅ /api مرة واحدة فقط
   app.setGlobalPrefix('api');
