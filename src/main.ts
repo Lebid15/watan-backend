@@ -70,7 +70,8 @@ async function bootstrap() {
 
   // ✅ احصل على DataSource قبل الاستماع لتطبيق الهجرات (مهم للإنتاج)
   const dataSource = app.get(DataSource);
-  if (process.env.NODE_ENV === 'production') {
+  const autoMigrations = (process.env.AUTO_MIGRATIONS ?? 'true').toLowerCase() !== 'false';
+  if (autoMigrations) {
     try {
       const ran = await dataSource.runMigrations();
       if (ran.length) {
@@ -82,7 +83,7 @@ async function bootstrap() {
       console.error('❌ Failed to run migrations automatically:', err?.message || err);
     }
   } else {
-    console.log('🛠 Skipping auto migrations (not production)');
+    console.log('⏭ Skipping auto migrations (AUTO_MIGRATIONS=false)');
   }
 
   await app.listen(port, host);

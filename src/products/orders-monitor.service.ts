@@ -13,6 +13,8 @@ type ExternalStatus = 'not_sent' | 'queued' | 'sent' | 'processing' | 'done' | '
 @Injectable()
 export class OrdersMonitorService {
   private readonly logger = new Logger(OrdersMonitorService.name);
+  // علم داخلي لمنع تكرار رسالة التحذير عن غياب tenantId
+  private static missingTenantLogged = false;
 
   constructor(
     @InjectRepository(ProductOrder)
@@ -29,10 +31,24 @@ export class OrdersMonitorService {
   @Cron(CronExpression.EVERY_5_SECONDS)
   async checkPendingOrders() {
     // نجلب فقط ما يحتاج متابعة حقًا
-    const orders = await this.orderRepo.find({
-      where: { externalStatus: In(['sent', 'processing']) },
-      take: 10,
-    });
+    let orders: ProductOrder[] = [];
+    try {
+      orders = await this.orderRepo.find({
+        where: { externalStatus: In(['sent', 'processing']) },
+        take: 10,
+      });
+    } catch (err: any) {
+      // حماية: لو لم تُطبَّق الهجرات بعد (عمود tenantId مفقود) نكتم التكرار
+      const code = err?.code || err?.driverError?.code;
+      if (code === '42703') {
+        if (!OrdersMonitorService.missingTenantLogged) {
+          this.logger.warn('⚠️ Skipping orders monitor: tenantId column missing – run migrations.');
+          OrdersMonitorService.missingTenantLogged = true;
+        }
+        return; // نخرج بدون فشل الكرون
+      }
+      throw err; // أخطاء أخرى نرميها
+    }
     if (!orders.length) return;
 
     for (const order of orders) {
