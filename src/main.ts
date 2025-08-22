@@ -294,6 +294,8 @@ async function bootstrap() {
   try {
     const globalRoleStats = await dataSource.query(`SELECT role, count(*) FROM users WHERE "tenantId" IS NULL GROUP BY role`);
     console.log('[BOOTSTRAP][GLOBAL-STATS] tenantId NULL counts:', globalRoleStats);
+  const globalUsersSample = await dataSource.query(`SELECT email, role, "tenantId" FROM users WHERE "tenantId" IS NULL ORDER BY "createdAt" DESC LIMIT 10`);
+  console.log('[BOOTSTRAP][GLOBAL-LIST] sample (max 10):', globalUsersSample);
   } catch (e:any) {
     console.warn('[BOOTSTRAP][GLOBAL-STATS] Failed to read stats:', e.message || e);
   }
@@ -324,6 +326,8 @@ async function bootstrap() {
           } as any);
           await userRepo.save(newDev);
           console.log('✅ Bootstrap developer user created:', { email: devEmail });
+          const verifyDev = await userRepo.findOne({ where: { email: devEmail, tenantId: null as any } as any });
+          console.log('[BOOTSTRAP][DEV] Post-create verification exists?', !!verifyDev);
         } else if ((process.env.RESET_DEV_ON_DEPLOY || 'false').toLowerCase() === 'true') {
           existingDev.password = await bcrypt.hash(devPassword, 10);
           await userRepo.save(existingDev);
