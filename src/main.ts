@@ -67,10 +67,27 @@ async function bootstrap() {
 
   const port = Number(process.env.PORT) || 3001;
   const host = process.env.HOST || '0.0.0.0';
+
+  // ✅ احصل على DataSource قبل الاستماع لتطبيق الهجرات (مهم للإنتاج)
+  const dataSource = app.get(DataSource);
+  if (process.env.NODE_ENV === 'production') {
+    try {
+      const ran = await dataSource.runMigrations();
+      if (ran.length) {
+        console.log(`✅ Ran ${ran.length} migration(s):`, ran.map(m => m.name));
+      } else {
+        console.log('ℹ️ No pending migrations');
+      }
+    } catch (err: any) {
+      console.error('❌ Failed to run migrations automatically:', err?.message || err);
+    }
+  } else {
+    console.log('🛠 Skipping auto migrations (not production)');
+  }
+
   await app.listen(port, host);
 
-  // ✅ اختبار اتصال DB
-  const dataSource = app.get(DataSource);
+  // ✅ اختبار اتصال DB بعد الاستماع
   try {
     await dataSource.query('SELECT NOW()');
     console.log('✅ Database connected:', {
