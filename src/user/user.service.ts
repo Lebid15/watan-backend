@@ -57,7 +57,20 @@ export class UserService {
       tenantId === null
         ? ({ email, tenantId: IsNull() } as any)
         : ({ email, tenantId } as any);
-    return this.usersRepository.findOne({ where, relations });
+    try {
+      return await this.usersRepository.findOne({ where, relations });
+    } catch (err: any) {
+      if (err?.code === '42703' || /column .*tenantId.* does not exist/i.test(err?.message || '')) {
+        console.warn('[SAFE] findByEmail retry without relations due to missing column:', err.message);
+        try {
+          return await this.usersRepository.findOne({ where });
+        } catch (err2) {
+          console.error('[SAFE] findByEmail second failure:', (err2 as any)?.message || err2);
+          throw err; // أعد الخطأ الأصلي
+        }
+      }
+      throw err;
+    }
   }
 
   // ✅ تدعم tenantId = null (مالك المنصة)
@@ -67,7 +80,20 @@ export class UserService {
       tenantId === null
         ? ({ username, tenantId: IsNull() } as any)
         : ({ username, tenantId } as any);
-    return this.usersRepository.findOne({ where, relations });
+    try {
+      return await this.usersRepository.findOne({ where, relations });
+    } catch (err: any) {
+      if (err?.code === '42703' || /column .*tenantId.* does not exist/i.test(err?.message || '')) {
+        console.warn('[SAFE] findByUsername retry without relations due to missing column:', err.message);
+        try {
+          return await this.usersRepository.findOne({ where });
+        } catch (err2) {
+          console.error('[SAFE] findByUsername second failure:', (err2 as any)?.message || err2);
+          throw err;
+        }
+      }
+      throw err;
+    }
   }
 
   // ✅ دالة صريحة للبحث عن مالك المنصة (tenantId IS NULL) بالبريد أو اليوزرنيم
