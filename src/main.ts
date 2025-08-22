@@ -79,6 +79,39 @@ async function bootstrap() {
     await dataSource.query(`
       DO $$
       BEGIN
+        -- ====== Core tenant tables (create if missing) ======
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.tables WHERE table_name='tenant'
+        ) THEN
+          CREATE TABLE "tenant" (
+            "id" uuid PRIMARY KEY,
+            "name" varchar(120) NOT NULL,
+            "code" varchar(40) NOT NULL,
+            "ownerUserId" uuid NULL,
+            "isActive" boolean NOT NULL DEFAULT true,
+            "createdAt" timestamptz NOT NULL DEFAULT now(),
+            "updatedAt" timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS "idx_tenant_code_unique" ON "tenant" ("code");
+          CREATE INDEX IF NOT EXISTS "idx_tenant_name" ON "tenant" ("name");
+          RAISE NOTICE 'Created table tenant';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.tables WHERE table_name='tenant_domain'
+        ) THEN
+          CREATE TABLE "tenant_domain" (
+            "id" uuid PRIMARY KEY,
+            "tenantId" uuid NOT NULL REFERENCES "tenant"("id") ON DELETE CASCADE,
+            "domain" varchar(190) NOT NULL,
+            "type" varchar(20) NOT NULL DEFAULT 'subdomain',
+            "isPrimary" boolean NOT NULL DEFAULT false,
+            "isVerified" boolean NOT NULL DEFAULT false,
+            "createdAt" timestamptz NOT NULL DEFAULT now(),
+            "updatedAt" timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS "ux_tenant_domain_domain" ON "tenant_domain" ("domain");
+          RAISE NOTICE 'Created table tenant_domain';
+        END IF;
         -- users.tenantId
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'
@@ -138,6 +171,8 @@ async function bootstrap() {
       END$$;
     `);
     const [usersHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'`);
+  const [tenantTable] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name='tenant'`);
+  const [tenantDomainTable] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name='tenant_domain'`);
     const [ordersHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='product_orders' AND column_name='tenantId'`);
     const [productHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='product' AND column_name='tenantId'`);
     const [packagesHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='product_packages' AND column_name='tenantId'`);
@@ -146,6 +181,8 @@ async function bootstrap() {
     const [packageCostsHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='package_costs' AND column_name='tenantId'`);
     const [dispatchLogsHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='order_dispatch_logs' AND column_name='tenantId'`);
     console.log('🧪 [Preflight] Exists:', {
+  tenant: tenantTable?.c === 1,
+  tenant_domain: tenantDomainTable?.c === 1,
       users: usersHas?.c === 1,
       product_orders: ordersHas?.c === 1,
       product: productHas?.c === 1,
