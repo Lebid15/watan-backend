@@ -290,6 +290,46 @@ async function bootstrap() {
     console.log('⏭ Root bootstrap disabled (BOOTSTRAP_ENABLED=false)');
   }
 
+  // ================= Bootstrap Developer (Global) =================
+  // مفعّل افتراضياً مع BOOTSTRAP_ENABLED، ويستخدم INITIAL_DEV_EMAIL + INITIAL_DEV_PASSWORD
+  if ((process.env.BOOTSTRAP_ENABLED || 'true').toLowerCase() === 'true') {
+    try {
+      const devEmail = process.env.INITIAL_DEV_EMAIL;
+      const devPassword = process.env.INITIAL_DEV_PASSWORD;
+      if (devEmail && devPassword) {
+        const userRepo = dataSource.getRepository(User);
+        const existingDev = await userRepo.createQueryBuilder('u')
+          .where('u.email = :email', { email: devEmail })
+          .andWhere('u.role = :role', { role: 'developer' })
+          .andWhere('u.tenantId IS NULL')
+          .getOne();
+        if (!existingDev) {
+          const hash = await bcrypt.hash(devPassword, 10);
+          const newDev = userRepo.create({
+            email: devEmail,
+            password: hash,
+            role: 'developer',
+            tenantId: null,
+            isActive: true,
+            balance: 0,
+          } as any);
+          await userRepo.save(newDev);
+          console.log('✅ Bootstrap developer user created:', { email: devEmail });
+        } else if ((process.env.RESET_DEV_ON_DEPLOY || 'false').toLowerCase() === 'true') {
+          existingDev.password = await bcrypt.hash(devPassword, 10);
+          await userRepo.save(existingDev);
+          console.log('🔄 Developer user password reset');
+        } else {
+          console.log('ℹ️ Developer user already exists');
+        }
+      } else {
+        console.log('ℹ️ Skipping developer bootstrap (missing INITIAL_DEV_EMAIL or INITIAL_DEV_PASSWORD)');
+      }
+    } catch (e: any) {
+      console.error('❌ Bootstrap developer user failed:', e?.message || e);
+    }
+  }
+
   await app.listen(port, host);
 
   // ✅ اختبار اتصال DB بعد الاستماع
