@@ -296,6 +296,7 @@ async function bootstrap() {
     try {
       const devEmail = process.env.INITIAL_DEV_EMAIL;
       const devPassword = process.env.INITIAL_DEV_PASSWORD;
+  console.log('[BOOTSTRAP][DEV] Env present?', { email: !!devEmail, password: devPassword ? '***' : false, reset: (process.env.RESET_DEV_ON_DEPLOY||'false').toLowerCase() });
       if (devEmail && devPassword) {
         const userRepo = dataSource.getRepository(User);
         const existingDev = await userRepo.createQueryBuilder('u')
