@@ -23,6 +23,8 @@ import { AppModule } from './app.module';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { DataSource } from 'typeorm';
+import { User } from './user/user.entity';
+import * as bcrypt from 'bcrypt';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -84,6 +86,56 @@ async function bootstrap() {
     }
   } else {
     console.log('⏭ Skipping auto migrations (AUTO_MIGRATIONS=false)');
+  }
+
+  // ================= Bootstrap Root (Instance Owner) =================
+  if ((process.env.BOOTSTRAP_ENABLED || 'true').toLowerCase() === 'true') {
+    try {
+      const userRepo = dataSource.getRepository(User);
+      // ابحث عن أي مستخدم مالك منصة حالي
+      const existing = await userRepo.createQueryBuilder('u')
+        .where('u.role = :role', { role: 'instance_owner' })
+        .andWhere('u.tenantId IS NULL')
+        .getOne();
+      if (!existing) {
+        const email = process.env.INITIAL_ROOT_EMAIL;
+        const username = process.env.INITIAL_ROOT_USERNAME || (email ? email.split('@')[0] : 'root');
+        const passwordPlain = process.env.INITIAL_ROOT_PASSWORD;
+        if (!email || !passwordPlain) {
+          console.warn('⚠️ Skipping root bootstrap: INITIAL_ROOT_EMAIL or INITIAL_ROOT_PASSWORD missing');
+        } else {
+          const hash = await bcrypt.hash(passwordPlain, 10);
+          const user = userRepo.create({
+            email,
+            username,
+            password: hash,
+            role: 'instance_owner',
+            tenantId: null,
+            isActive: true,
+            balance: 0,
+          });
+          await userRepo.save(user);
+          console.log('✅ Bootstrap root user created:', { email, username });
+        }
+      } else if ((process.env.RESET_ROOT_ON_DEPLOY || 'false').toLowerCase() === 'true') {
+        const passwordPlain = process.env.INITIAL_ROOT_PASSWORD;
+        if (passwordPlain) {
+          existing.password = await bcrypt.hash(passwordPlain, 10);
+          await userRepo.save(existing);
+          console.log('🔄 Root user password reset');
+        } else {
+          console.warn('⚠️ RESET_ROOT_ON_DEPLOY=true ولكن لا توجد INITIAL_ROOT_PASSWORD');
+        }
+      } else {
+        // موجود بالفعل ولا إعادة ضبط
+        // لا طباعة حساسة لكلمة السر
+        console.log('ℹ️ Root user already exists (instance_owner).');
+      }
+    } catch (e: any) {
+      console.error('❌ Bootstrap root user failed:', e?.message || e);
+    }
+  } else {
+    console.log('⏭ Root bootstrap disabled (BOOTSTRAP_ENABLED=false)');
   }
 
   await app.listen(port, host);
