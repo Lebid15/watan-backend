@@ -5,6 +5,7 @@ import {
   Unique,
   ManyToOne,
   JoinColumn,
+  Index,
 } from 'typeorm';
 import { ProductPackage } from '../products/product-package.entity';
 
@@ -12,10 +13,15 @@ export type RoutingMode = 'manual' | 'auto';
 export type ProviderType = 'manual' | 'external' | 'internal_codes';
 
 @Entity('package_routing')
-@Unique('ux_package_routing_package', ['package'])
+@Unique('ux_package_routing_package_tenant', ['tenantId', 'package'])
 export class PackageRouting {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // 🔑 ربط بالـ Tenant
+  @Column('uuid')
+  @Index()
+  tenantId: string;
 
   @ManyToOne(() => ProductPackage, { onDelete: 'CASCADE', eager: true })
   @JoinColumn({ name: 'package_id' })

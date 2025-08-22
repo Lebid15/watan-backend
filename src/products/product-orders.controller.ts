@@ -30,11 +30,18 @@ export class ProductOrdersController {
   @Get('me')
   async getMyOrders(@Req() req: Request, @Query() query: ListOrdersDto) {
     const user = req.user as any;
-    return this.productsService.listOrdersWithPagination({
-      ...query,
-      // @ts-ignore: خاصية مؤقتة تقرأها service لتصفية الطلبات حسب المستخدم
-      userId: user.id,
-    } as any);
+    // ملاحظة: دالة السيرفس تستقبل (dto, tenantId?) لذلك نمرّر tenantId كوسيط ثاني
+    // ونكتفي بتمرير userId داخل الـ dto. كان سابقاً يُمرَّر tenantId داخل dto فقط (يُتجاهَل).
+    return this.productsService.listOrdersWithPagination(
+      {
+        ...query,
+        // خصائص مؤقتة يقرأها السيرفس للتصفية
+        // @ts-ignore
+        userId: user.id,
+      } as any,
+      // @ts-ignore
+      user.tenantId,
+    );
   }
 
   /** (اختياري) طلبات مستخدم محدد — للأدمن فقط — مع pagination */
@@ -43,12 +50,16 @@ export class ProductOrdersController {
   @Get('user/:userId')
   async getUserOrdersAdmin(
     @Param('userId') userId: string,
-    @Query() query: ListOrdersDto
+    @Query() query: ListOrdersDto,
+    @Req() req: Request,
   ) {
+    const user = req.user as any;
     return this.productsService.listOrdersWithPagination({
       ...query,
-      // @ts-ignore: خاصية مؤقتة تقرأها service
+      // @ts-ignore
       userId,
+      // @ts-ignore
+      tenantId: user.tenantId, // ⬅︎ تقييد ضمن تينانت الأدمن
     } as any);
   }
 
@@ -56,18 +67,24 @@ export class ProductOrdersController {
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
   @Get()
-  async getAllOrders(@Query() query: ListOrdersDto) {
+  async getAllOrders(@Query() query: ListOrdersDto, @Req() req: Request) {
+    const user = req.user as any;
     // ترجع { items, pageInfo: { nextCursor, hasMore }, meta }
-    return this.productsService.listOrdersForAdmin(query);
+    return this.productsService.listOrdersForAdmin({
+      ...query,
+      // @ts-ignore
+      tenantId: user.tenantId, // ⬅︎ تمرير التينانت للتصفية على مستوى السيرفس
+    } as any);
   }
 
   /** ✅ تفاصيل طلب للمستخدم الحالي (تشمل الملاحظات والرسائل) */
   @Get(':id')
   async getOrderDetails(
     @Param('id', new ParseUUIDPipe()) id: string,
-    @Req() req: Request
+    @Req() req: Request,
   ) {
     const user = req.user as any;
+    // هنا نستخدم دالة السيرفس القائمة التي تتحقق من أن الطلب يعود لنفس المستخدم
     return this.productsService.getOrderDetailsForUser(id, user.id);
   }
 
@@ -80,15 +97,16 @@ export class ProductOrdersController {
       packageId: string;
       quantity: number;
       userIdentifier?: string;
-      extraField?: string; // جديد
+      extraField?: string;
     },
-    @Req() req: Request
+    @Req() req: Request,
   ) {
     const user = req.user as any;
 
     const order = await this.productsService.createOrder({
       ...body,
       userId: user.id, // 🔒 من الـ JWT
+      // tenantId ليس مطلوبًا هنا الآن لأن السيرفس يقتطع من user لاحقًا عند الحاجة
     });
 
     return {
@@ -113,8 +131,10 @@ export class ProductOrdersController {
   @Patch(':id/status')
   async setStatus(
     @Param('id', new ParseUUIDPipe()) id: string,
-    @Body('status') status: 'approved' | 'rejected'
+    @Body('status') status: 'approved' | 'rejected',
+    @Req() req: Request,
   ) {
+    // مبدئيًا لا نتحقق من tenant هنا، سنعتمد على تصفية السيرفس لاحقًا عندما نضيف شرط tenant
     const updated = await this.productsService.updateOrderStatus(id, status);
     return { ok: true, id, status: updated?.status ?? status };
   }

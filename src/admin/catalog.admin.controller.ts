@@ -1,7 +1,7 @@
 // src/admin/catalog.admin.controller.ts
 import {
   Controller, Get, Post, Put, Body, Param, Query,
-  UseGuards, NotFoundException, BadRequestException,
+  UseGuards, NotFoundException, BadRequestException, Req,
 } from '@nestjs/common';
 import { Roles } from '../auth/roles.decorator';
 import { UserRole } from '../auth/user-role.enum';
@@ -9,21 +9,22 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
+import type { Request } from 'express';
 
 import { CatalogProduct } from '../catalog/catalog-product.entity';
 import { CatalogPackage } from '../catalog/catalog-package.entity';
 
-// متجر المشرف
+// متجر المشرف (Tenant-scoped)
 import { Product } from '../products/product.entity';
 import { ProductPackage } from '../products/product-package.entity';
 
-// العملات
+// العملات (Tenant-scoped)
 import { Currency } from '../currencies/currency.entity';
 
 function normalizePkgName(input: any): string {
   const raw = (input ?? '').toString();
-  const noTags = raw.replace(/<[^>]*>/g, ' ');         // إزالة HTML
-  const oneSpace = noTags.replace(/\s+/g, ' ').trim(); // مسافة واحدة
+  const noTags = raw.replace(/<[^>]*>/g, ' ');
+  const oneSpace = noTags.replace(/\s+/g, ' ').trim();
   const MAX = 100;
   const out = oneSpace.length > MAX ? oneSpace.slice(0, MAX) : oneSpace;
   return out || 'Package';
@@ -42,7 +43,7 @@ export class CatalogAdminController {
   ) {}
 
   /* =======================
-     قائمة المنتجات (عدّ الباقات اختياريًا)
+     قائمة منتجات الكتالوج (عالمي)
      ======================= */
   @Get('products')
   async listProducts(
@@ -83,7 +84,7 @@ export class CatalogAdminController {
   }
 
   /* =======================
-     باقات منتج كتالوج واحد
+     باقات منتج كتالوج (عالمي)
      ======================= */
   @Get('products/:id/packages')
   async listPackages(@Param('id') productId: string) {
@@ -96,18 +97,22 @@ export class CatalogAdminController {
   }
 
   /* ===========================================
-     1) تفعيل كل باقات منتج كتالوج واحد في المتجر
+     1) تفعيل كل باقات "كتالوج منتج" في متجر المشرف (Tenant)
      =========================================== */
   @Post('products/:id/enable-all')
-  async enableAllForCatalogProduct(@Param('id') catalogProductId: string) {
+  async enableAllForCatalogProduct(@Param('id') catalogProductId: string, @Req() req: Request) {
+    const tenantId = (req as any)?.user?.tenantId as string | undefined;
+    if (!tenantId) throw new BadRequestException('Missing tenantId');
+
     const catalogProduct = await this.productsRepo.findOne({ where: { id: catalogProductId } });
     if (!catalogProduct) throw new NotFoundException('Catalog product not found');
 
-    // منتج المتجر بنفس الاسم (إن لم يوجد ننشئه)
-    let shopProduct = await this.shopProducts.findOne({ where: { name: catalogProduct.name } });
+    // منتج المتجر بنفس الاسم داخل نفس المستأجر
+    let shopProduct = await this.shopProducts.findOne({ where: { tenantId, name: catalogProduct.name } });
     if (!shopProduct) {
       shopProduct = await this.shopProducts.save(
         this.shopProducts.create({
+          tenantId,
           name:        catalogProduct.name,
           description: (catalogProduct as any).description ?? null,
           imageUrl:    (catalogProduct as any).imageUrl ?? null,
@@ -130,7 +135,7 @@ export class CatalogAdminController {
 
     // باقات المتجر الحالية — فهرس بالأسماء المُنقّاة
     const existingShopPkgs = await this.shopPackages.find({
-      where: { product: { id: shopProduct.id } },
+      where: { tenantId, product: { id: shopProduct.id } },
     });
     const byName = new Map(existingShopPkgs.map((p) => [normalizePkgName(p.name), p]));
 
@@ -141,14 +146,15 @@ export class CatalogAdminController {
       const cleanName = normalizePkgName((c as any).name);
       if (byName.has(cleanName)) { skipped++; continue; }
 
-      // احترم فريدة publicCode
+      // publicCode فريدة داخل نفس الـ tenant فقط
       let publicCode: string | null = (c as any).publicCode ?? null;
       if (publicCode) {
-        const conflict = await this.shopPackages.findOne({ where: { publicCode } });
+        const conflict = await this.shopPackages.findOne({ where: { tenantId, publicCode } });
         if (conflict) publicCode = null;
       }
 
       const pkg = this.shopPackages.create({
+        tenantId,
         product:   shopProduct,
         name:      cleanName,
         publicCode,
@@ -170,10 +176,13 @@ export class CatalogAdminController {
   }
 
   /* ===========================================
-     2) تفعيل كل منتجات/باقات مزوّد في المتجر
+     2) تفعيل كل منتجات/باقات مزوّد في المتجر (Tenant)
      =========================================== */
   @Post('providers/:providerId/enable-all')
-  async enableAllForProvider(@Param('providerId') providerId: string) {
+  async enableAllForProvider(@Param('providerId') providerId: string, @Req() req: Request) {
+    const tenantId = (req as any)?.user?.tenantId as string | undefined;
+    if (!tenantId) throw new BadRequestException('Missing tenantId');
+
     const catalogProducts = await this.productsRepo.find({
       where: { sourceProviderId: providerId },
       order: { name: 'ASC' },
@@ -186,11 +195,12 @@ export class CatalogAdminController {
     let totalCatalogPkgs = 0;
 
     for (const cp of catalogProducts) {
-      // منتج المتجر بنفس الاسم
-      let sp = await this.shopProducts.findOne({ where: { name: cp.name } });
+      // منتج المتجر بنفس الاسم ضمن نفس الـ tenant
+      let sp = await this.shopProducts.findOne({ where: { tenantId, name: cp.name } });
       if (!sp) {
         sp = await this.shopProducts.save(
           this.shopProducts.create({
+            tenantId,
             name:        cp.name,
             description: (cp as any).description ?? null,
             imageUrl:    (cp as any).imageUrl ?? null,
@@ -214,7 +224,7 @@ export class CatalogAdminController {
 
       // باقات المتجر الحالية — فهرس بالأسماء المُنقّاة
       const existingShopPkgs = await this.shopPackages.find({
-        where: { product: { id: sp.id } },
+        where: { tenantId, product: { id: sp.id } },
       });
       const byName = new Map(existingShopPkgs.map((p) => [normalizePkgName(p.name), p]));
 
@@ -224,11 +234,12 @@ export class CatalogAdminController {
 
         let publicCode: string | null = (c as any).publicCode ?? null;
         if (publicCode) {
-          const conflict = await this.shopPackages.findOne({ where: { publicCode } });
+          const conflict = await this.shopPackages.findOne({ where: { tenantId, publicCode } });
           if (conflict) publicCode = null;
         }
 
         const pkg = this.shopPackages.create({
+          tenantId,
           product:   sp,
           name:      cleanName,
           publicCode,
@@ -252,13 +263,17 @@ export class CatalogAdminController {
   }
 
   /* ===========================================
-     3) تحديث صور منتج الكتالوج (مع نشر للصنف بالمتجر)
+     3) تحديث صورة منتج كتالوج (مع نشر للصنف في المتجر/tenant)
      =========================================== */
   @Put('products/:id/image')
   async setCatalogProductImage(
     @Param('id') id: string,
-    @Body() body: { imageUrl?: string; propagate?: boolean }
+    @Body() body: { imageUrl?: string; propagate?: boolean },
+    @Req() req: Request,
   ) {
+    const tenantId = (req as any)?.user?.tenantId as string | undefined;
+    if (!tenantId) throw new BadRequestException('Missing tenantId');
+
     const p = await this.productsRepo.findOne({ where: { id } });
     if (!p) throw new NotFoundException('Catalog product not found');
 
@@ -266,7 +281,7 @@ export class CatalogAdminController {
     await this.productsRepo.save(p);
 
     if (body?.propagate) {
-      const sp = await this.shopProducts.findOne({ where: { name: p.name } });
+      const sp = await this.shopProducts.findOne({ where: { tenantId, name: p.name } });
       if (sp && !sp.imageUrl && (p as any).imageUrl) {
         sp.imageUrl = (p as any).imageUrl;
         await this.shopProducts.save(sp);
@@ -277,43 +292,45 @@ export class CatalogAdminController {
   }
 
   /* ===========================================
-     4) تحديث الأسعار من الكتالوج → متجر المشرف (USD حصراً)
+     4) تحديث الأسعار من الكتالوج → متجر المشرف (USD) (Tenant)
      =========================================== */
   @Post('providers/:providerId/refresh-prices')
   async refreshPricesForProvider(
     @Param('providerId') providerId: string,
-    @Body() body?: { mode?: 'copy' | 'markup'; markupPercent?: number; fixedFee?: number; overwriteZero?: boolean }
+    @Body() body: { mode?: 'copy' | 'markup'; markupPercent?: number; fixedFee?: number; overwriteZero?: boolean } | undefined,
+    @Req() req: Request,
   ) {
+    const tenantId = (req as any)?.user?.tenantId as string | undefined;
+    if (!tenantId) throw new BadRequestException('Missing tenantId');
+
     const mode = (body?.mode === 'markup') ? 'markup' : 'copy';
     const markupPercent = Number(body?.markupPercent ?? 0) || 0;
     const fixedFee = Number(body?.fixedFee ?? 0) || 0;
-    const overwriteZero = body?.overwriteZero !== false; // افتراضي: true (اسمح بالكتابة حتى لو فيه قيمة سابقة)
+    const overwriteZero = body?.overwriteZero !== false; // افتراضي: true
 
-    // منتجات الكتالوج لهذا المزود
+    // منتجات الكتالوج لهذا المزود (عالمي)
     const catalogProducts = await this.productsRepo.find({
       where: { sourceProviderId: providerId },
       order: { name: 'ASC' },
       take: 10000,
     });
 
-    // حضّر أسعار الصرف: كم دولار لكل 1 وحدة عملة (unitToUsd)
-    const currencies = await this.currencyRepo.find();
+    // أسعار صرف خاصة بالـ tenant
+    const currencies = await this.currencyRepo.find({ where: { tenantId } as any });
     const unitToUsd: Record<string, number> = {};
     for (const c of currencies as any[]) {
       const code = (c.code ?? c.currency ?? '').toString().toUpperCase();
       if (!code) continue;
 
-      // احتمال 1: مخزّن "كم دولار لكل 1 وحدة" (toUSD)
       const toUsd =
         Number(c.rateToUsd ?? c.usdRate ?? c.toUsd ?? 0) || 0;
 
-      // احتمال 2: مخزّن "كم وحدة لكل 1 دولار" (perUSD)
       const perUsd =
         Number(c.perUsd ?? c.rateFromUsd ?? c.rate ?? 0) || 0;
 
       let k = 0;
-      if (toUsd > 0) k = toUsd;            // مثال: 1 TRY = 0.03 USD
-      else if (perUsd > 0) k = 1 / perUsd; // مثال: 1 USD = 33 TRY → 1 TRY = 1/33 USD
+      if (toUsd > 0) k = toUsd;            // 1 TRY = 0.03 USD
+      else if (perUsd > 0) k = 1 / perUsd; // 1 USD = 33 TRY → 1 TRY = 1/33 USD
 
       if (k > 0) unitToUsd[code] = k;
     }
@@ -325,7 +342,7 @@ export class CatalogAdminController {
     let skippedNoFx = 0;
     let totalCandidates = 0;
 
-    // فهرس سريع: productName -> (normalizedName -> {cost,currency})
+    // فهرس: productName -> (normalizedName -> {cost,currency})
     const catalogIndexByProduct = new Map<string, Map<string, { cost?: number; currency?: string }>>();
 
     for (const cp of catalogProducts) {
@@ -344,14 +361,14 @@ export class CatalogAdminController {
       catalogIndexByProduct.set(cp.name, map);
     }
 
-    // مرّ على منتجات المتجر المطابقة بالأسماء
+    // مرّ على منتجات المتجر المطابقة بالأسماء داخل نفس الـ tenant
     for (const cp of catalogProducts) {
-      const sp = await this.shopProducts.findOne({ where: { name: cp.name } });
-      if (!sp) continue; // لم يُفعّل هذا المنتج بعد
+      const sp = await this.shopProducts.findOne({ where: { tenantId, name: cp.name } });
+      if (!sp) continue;
 
       const catMap = catalogIndexByProduct.get(cp.name) || new Map();
 
-      const shopPkgs = await this.shopPackages.find({ where: { product: { id: sp.id } } });
+      const shopPkgs = await this.shopPackages.find({ where: { tenantId, product: { id: sp.id } } });
       for (const pkg of shopPkgs as any[]) {
         totalCandidates++;
 
@@ -373,11 +390,8 @@ export class CatalogAdminController {
           usd = usd + fixedFee;
         }
 
-        // أمان + تقريب
         usd = Math.max(0, Number(usd.toFixed(4)));
 
-        // لو overwriteZero=true → اكتب دائمًا
-        // لو false → اكتب فقط لما basePrice الحالي = 0
         const shouldWrite = overwriteZero ? true : Number(pkg.basePrice || 0) === 0;
 
         if (shouldWrite) {

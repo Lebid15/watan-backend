@@ -1,3 +1,4 @@
+// backend/src/payments/deposits.service.ts
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, Brackets } from 'typeorm';
@@ -23,6 +24,31 @@ export class DepositsService {
     private readonly notifications: NotificationsService,
   ) {}
 
+  // --------- Helpers (tenancy) ---------
+
+  /** يتأكد أن المستخدم ينتمي لنفس المستأجر */
+  private async assertUserInTenant(userId: string, tenantId: string) {
+    const user = await this.usersRepo.findOne({ where: { id: userId, tenantId } as any });
+    if (!user) throw new NotFoundException('المستخدم غير موجود ضمن هذا المستأجر');
+    return user;
+  }
+
+  /** يجلب وسيلة الدفع ضمن نفس المستأجر */
+  private async getMethodInTenant(methodId: string, tenantId: string) {
+    const method = await this.methodsRepo.findOne({ where: { id: methodId, tenantId } as any });
+    if (!method) throw new BadRequestException('وسيلة الدفع غير متاحة ضمن هذا المستأجر');
+    if (!method.isActive) throw new BadRequestException('وسيلة الدفع غير مفعّلة');
+    return method;
+  }
+
+  /** يجلب إيداعًا ضمن نفس المستأجر */
+  private async getDepositInTenant(id: string, tenantId: string, manager = this.depositsRepo.manager) {
+    const dep = await manager.findOne(Deposit, { where: { id, tenantId } as any });
+    if (!dep) throw new NotFoundException('طلب الإيداع غير موجود ضمن هذا المستأجر');
+    return dep;
+  }
+
+  // --------- FX rates (بدون tenantId مؤقتًا) ---------
   private async getRate(code: string): Promise<number> {
     const c = await this.currenciesRepo.findOne({ where: { code } as any });
     if (!c) throw new NotFoundException(`العملة ${code} غير موجودة`);
@@ -33,13 +59,12 @@ export class DepositsService {
     return Number(r);
   }
 
-  /** المستخدم: إنشاء طلب إيداع Pending */
-  async createDeposit(userId: string, dto: CreateDepositDto) {
-    const user = await this.usersRepo.findOne({ where: { id: userId } as any });
-    if (!user) throw new NotFoundException('المستخدم غير موجود');
+  // --------- User Endpoints ---------
 
-    const method = await this.methodsRepo.findOne({ where: { id: dto.methodId } });
-    if (!method || !method.isActive) throw new BadRequestException('وسيلة الدفع غير متاحة');
+  /** المستخدم: إنشاء طلب إيداع Pending مع فرض tenantId */
+  async createDeposit(userId: string, tenantId: string, dto: CreateDepositDto) {
+    const user = await this.assertUserInTenant(userId, tenantId);
+    const method = await this.getMethodInTenant(dto.methodId, tenantId);
 
     if (dto.originalAmount <= 0) throw new BadRequestException('المبلغ يجب أن يكون أكبر من صفر');
 
@@ -53,6 +78,7 @@ export class DepositsService {
     const convertedAmount = Number(dto.originalAmount) * ratio;
 
     const entity = this.depositsRepo.create({
+      tenantId,
       user_id: user.id,
       method_id: method.id,
       originalAmount: dto.originalAmount.toString(),
@@ -67,27 +93,32 @@ export class DepositsService {
     return this.depositsRepo.save(entity);
   }
 
-  /** ✅ (توافق خلفي) مصفوفة بسيطة بدون باجينيشن */
-  findMy(userId: string) {
+  /** (توافق خلفي) مصفوفة بسيطة بدون باجينيشن – مع فرض tenantId */
+  findMy(userId: string, tenantId: string) {
     return this.depositsRepo.find({
-      where: { user_id: userId } as any,
+      where: { user_id: userId, tenantId } as any,
       relations: { method: true },
       order: { createdAt: 'DESC' },
     });
   }
 
-  /** ✅ جديد: المستخدم — باجينيشن cursor { items, pageInfo } */
+  /** المستخدم: باجينيشن cursor { items, pageInfo } — مع فرض tenantId */
   async listMineWithPagination(
     userId: string,
+    tenantId: string,
     dto: { limit?: number; cursor?: string | null },
   ) {
+    // تأكيد أن المستخدم ضمن المستأجر (حماية إضافية)
+    await this.assertUserInTenant(userId, tenantId);
+
     const limit = Math.max(1, Math.min(100, dto.limit ?? 20));
     const cursor = decodeCursor(dto.cursor);
 
     const qb = this.depositsRepo
       .createQueryBuilder('d')
       .leftJoinAndSelect('d.method', 'm')
-      .where('d.user_id = :uid', { uid: userId });
+      .where('d.tenantId = :tid', { tid: tenantId })
+      .andWhere('d.user_id = :uid', { uid: userId });
 
     // Keyset: createdAt DESC, id DESC
     if (cursor) {
@@ -152,22 +183,23 @@ export class DepositsService {
     return {
       items,
       pageInfo: { nextCursor, hasMore },
-      meta: {
-        limit,
-      },
+      meta: { limit },
     };
   }
 
-  /** المشرف: جميع الطلبات (بسيط) */
-  findAllAdmin() {
+  // --------- Admin Endpoints (tenancy enforced) ---------
+
+  /** المشرف: جميع الطلبات (بسيط) — مع فرض tenantId */
+  findAllAdmin(tenantId: string) {
     return this.depositsRepo.find({
+      where: { tenantId } as any,
       relations: { user: true, method: true },
       order: { createdAt: 'DESC' },
     });
   }
 
   /**
-   * المشرف: تغيير الحالة مع عكس أثر الرصيد عند التحويل بين (approved/rejected)
+   * المشرف: تغيير الحالة مع عكس أثر الرصيد ضمن نفس المستأجر
    * القواعد:
    * - pending -> approved: شحن الرصيد بقيمة convertedAmount
    * - pending -> rejected: لا شيء
@@ -176,13 +208,10 @@ export class DepositsService {
    * - أي انتقال إلى pending بعد قرار نهائي: غير مسموح
    * - نفس الحالة: لا شيء
    */
-/** تغيير الحالة مع تعديل الرصيد، بلا أقفال صريحة وبلا انتظار إشعارات */
-  async setStatus(id: string, newStatus: DepositStatus) {
+  async setStatus(id: string, tenantId: string, newStatus: DepositStatus) {
     return this.dataSource.transaction(async (manager) => {
-      // 1) اجلب الإيداع (بدون FOR UPDATE)
-      const dep = await manager.findOne(Deposit, { where: { id } as any });
-      if (!dep) throw new NotFoundException('طلب الإيداع غير موجود');
-
+      // 1) اجلب الإيداع ضمن نفس المستأجر
+      const dep = await this.getDepositInTenant(id, tenantId, manager);
       const oldStatus = dep.status;
       if (newStatus === oldStatus) return dep;
 
@@ -205,15 +234,15 @@ export class DepositsService {
         delta = -amount;
       }
 
-      // 3) طبّق التعديل على الرصيد بعملية increment مباشرة (تجنّب قفل يدوي)
+      // 3) طبّق التعديل على الرصيد للمستخدم ضمن نفس المستأجر فقط
       if (delta !== 0) {
-        // تقليم لخانتين لأن balance = DECIMAL(12,2)
         const deltaRounded = Number((Math.round(delta * 100) / 100).toFixed(2));
         await manager
           .createQueryBuilder()
           .update(User)
           .set({ balance: () => `ROUND(COALESCE(balance,0) + (${deltaRounded}), 2)` })
           .where('id = :uid', { uid: dep.user_id })
+          .andWhere('tenantId = :tid', { tid: tenantId })
           .execute();
       }
 
@@ -221,32 +250,51 @@ export class DepositsService {
       dep.status = newStatus;
       await manager.save(dep);
 
-      // 5) أرسل الإشعارات "Fire-and-forget" بعد نجاح الترنزكشن — لا تنتظرها
-      setImmediate(() => {
-        try {
-          if (newStatus === DepositStatus.APPROVED) {
-            void this.notifications.depositApproved(dep.user_id, amount, undefined, { depositId: dep.id });
-          } else if (newStatus === DepositStatus.REJECTED) {
-            const origAmt = Number((dep as any).originalAmount ?? 0);
-            const origCur = (dep as any).originalCurrency;
-            void this.notifications.depositRejected(dep.user_id, origAmt, origCur, undefined, { depositId: dep.id });
-          }
-        } catch { /* تجاهل أي فشل بالإشعار */ }
-      });
+    // 5) إشعارات (Fire-and-forget)
+    setImmediate(() => {
+      try {
+        if (newStatus === DepositStatus.APPROVED) {
+          // userId, tenantId, amount, methodName?, meta?
+          void this.notifications.depositApproved(
+            dep.user_id,
+            tenantId,
+            amount,
+            undefined,
+            { depositId: dep.id }
+          );
+        } else if (newStatus === DepositStatus.REJECTED) {
+          const origAmt = Number((dep as any).originalAmount ?? 0);
+          const origCur = (dep as any).originalCurrency;
+          // userId, tenantId, originalAmount, originalCurrency, methodName?, meta?
+          void this.notifications.depositRejected(
+            dep.user_id,
+            tenantId,
+            origAmt,
+            origCur,
+            undefined,
+            { depositId: dep.id }
+          );
+        }
+      } catch {
+        /* تجاهل أي فشل بالإشعار */
+      }
+    });
+
 
       return dep;
     });
   }
-  
-  /** المشرف: قائمة الإيداعات مع باجينيشن */
-  async listWithPagination(dto: ListDepositsDto) {
+
+  /** المشرف: قائمة الإيداعات مع باجينيشن — مع فرض tenantId */
+  async listWithPagination(dto: ListDepositsDto, tenantId: string) {
     const limit = Math.max(1, Math.min(100, dto.limit ?? 25));
     const cursor = decodeCursor(dto.cursor);
 
     const qb = this.depositsRepo
       .createQueryBuilder('d')
       .leftJoinAndSelect('d.user', 'u')
-      .leftJoinAndSelect('d.method', 'm');
+      .leftJoinAndSelect('d.method', 'm')
+      .where('d.tenantId = :tid', { tid: tenantId });
 
     if (dto.status) qb.andWhere('d.status = :status', { status: dto.status });
     if (dto.methodId) qb.andWhere('m.id = :mid', { mid: dto.methodId });

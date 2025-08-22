@@ -10,9 +10,14 @@ export type ProviderKind = 'barakat' | 'apstore' | 'znet';
 export type IntegrationScope = 'dev' | 'tenant';
 
 @Entity('integrations')
+@Index(['tenantId', 'name'], { unique: true }) // الاسم فريد داخل كل مستأجر
 export class Integration {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
+
+  @Column('uuid')
+  @Index()
+  tenantId!: string;
 
   @Column({ length: 120 })
   name!: string;
@@ -33,7 +38,7 @@ export class Integration {
   @Column({ type: 'varchar', length: 255, nullable: true })
   apiToken?: string | null;
 
-  // لزِنت
+  // لزنت
   @Column({ type: 'varchar', length: 120, nullable: true })
   kod?: string | null;
 

@@ -1,14 +1,25 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn,
-  OneToMany, Index, Unique
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  OneToMany,
+  Index,
+  Unique,
 } from 'typeorm';
 import { CodeItem } from './code-item.entity';
 
 @Entity('code_group')
-@Unique(['publicCode'])
+@Unique('ux_code_group_public_code_tenant', ['tenantId', 'publicCode'])
 export class CodeGroup {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // 🔑 ربط بالـ Tenant
+  @Column('uuid')
+  @Index()
+  tenantId: string;
 
   @Index()
   @Column({ type: 'varchar', length: 64 })

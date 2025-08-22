@@ -17,12 +17,19 @@ export type NotificationType =
   | 'announcement';
 
 @Entity('notifications')
-@Index('idx_notifications_user_id', ['user'])
-@Index('idx_notifications_is_read', ['isRead'])
-@Index('idx_notifications_created_at', ['createdAt'])
+@Index('idx_notifications_tenant_user', ['tenantId', 'user_id'])
+@Index('idx_notifications_tenant_isread_created', ['tenantId', 'isRead', 'createdAt'])
 export class Notification {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  @Column('uuid')
+  @Index()
+  tenantId: string;
+
+  /** FK صريح لسرعة الاستعلام */
+  @Column({ type: 'uuid' })
+  user_id: string;
 
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
@@ -43,7 +50,6 @@ export class Notification {
   @Column({ default: false })
   isRead: boolean;
 
-  // ✅ الحقول الجديدة
   @Column({ type: 'timestamp with time zone', nullable: true })
   readAt: Date | null;
 

@@ -18,6 +18,11 @@ export class OrderDispatchLog {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  // 🔑 ربط بالـ Tenant
+  @Column('uuid')
+  @Index()
+  tenantId: string;
+
   @ManyToOne(() => ProductOrder, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'order_id' })
   order: ProductOrder;

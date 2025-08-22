@@ -1,3 +1,4 @@
+// src/notifications/notifications.controller.ts
 import {
   Controller,
   Get,
@@ -20,8 +21,7 @@ import { UserRole } from '../auth/user-role.enum';
 export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}
 
-  // ✅ جديد: واجهة مع باجينيشن (متوافقة مع الفرونت)
-  // GET /notifications/mine?limit=20&cursor=...
+  // ✅ واجهة مع باجينيشن
   @UseGuards(JwtAuthGuard)
   @Get('mine')
   async mine(
@@ -29,19 +29,17 @@ export class NotificationsController {
     @Query('limit') limitQ?: string,
     @Query('cursor') cursor?: string,
   ) {
-    const userId =
-      req.user?.id ?? req.user?.userId ?? req.user?.sub;
+    const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub;
+    const tenantId = req.user?.tenantId;
     const limit = Math.max(1, Math.min(100, Number(limitQ ?? 20)));
-    // تحتاج في الـ service دالة: listMineWithPagination(userId, {limit, cursor})
-    return this.notifications.listMineWithPagination(userId, {
-      limit,
-      cursor: cursor ?? null,
-    });
+    return this.notifications.listMineWithPagination(
+      userId,
+      tenantId,
+      { limit, cursor: cursor ?? null },
+    );
   }
 
-  // 🔔 تنبيهات المستخدم الحالي (متوافق للخلف)
-  // ملاحظة: لو أُرسلت بارامترات limit/cursor هنا،
-  // نرجّع النتيجة الجديدة {items, pageInfo} بدل المصفوفة فقط
+  // 🔔 تنبيهات المستخدم الحالي (قديم + دعم pagination)
   @UseGuards(JwtAuthGuard)
   @Get('my')
   async my(
@@ -49,22 +47,22 @@ export class NotificationsController {
     @Query('limit') limitQ?: string,
     @Query('cursor') cursor?: string,
   ) {
-    const userId =
-      req.user?.id ?? req.user?.userId ?? req.user?.sub;
+    const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub;
+    const tenantId = req.user?.tenantId;
 
     if (limitQ || cursor) {
       const limit = Math.max(1, Math.min(100, Number(limitQ ?? 20)));
-      return this.notifications.listMineWithPagination(userId, {
-        limit,
-        cursor: cursor ?? null,
-      });
+      return this.notifications.listMineWithPagination(
+        userId,
+        tenantId,
+        { limit, cursor: cursor ?? null },
+      );
     }
 
-    // السلوك القديم: تعيد مصفوفة فقط
-    return this.notifications.findByUser(userId);
+    return this.notifications.findByUser(userId, tenantId);
   }
 
-  // ✅ alias: نفس mine، يسمح للفرونت يطلب GET /notifications مباشرة
+  // ✅ alias: نفس mine
   @UseGuards(JwtAuthGuard)
   @Get()
   async aliasRoot(
@@ -72,39 +70,40 @@ export class NotificationsController {
     @Query('limit') limitQ?: string,
     @Query('cursor') cursor?: string,
   ) {
-    const userId =
-      req.user?.id ?? req.user?.userId ?? req.user?.sub;
+    const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub;
+    const tenantId = req.user?.tenantId;
     const limit = Math.max(1, Math.min(100, Number(limitQ ?? 20)));
-    return this.notifications.listMineWithPagination(userId, {
-      limit,
-      cursor: cursor ?? null,
-    });
+    return this.notifications.listMineWithPagination(
+      userId,
+      tenantId,
+      { limit, cursor: cursor ?? null },
+    );
   }
 
-  // ✅ تعليم واحد كمقروء (يضبط readAt أيضًا)
+  // ✅ تعليم واحد كمقروء
   @UseGuards(JwtAuthGuard)
   @Patch(':id/read')
   async readOne(@Req() req: any, @Param('id') id: string) {
-    // تأكيد الملكية اختياري داخل السيرفس
-    // أو تمرير userId لو أردت التحقق هناك
-    return this.notifications.markAsRead(id, req.user?.id);
+    const tenantId = req.user?.tenantId;
+    return this.notifications.markAsRead(id, req.user?.id, tenantId);
   }
 
-  // ✅ تعليم الكل كمقروء (يضبط readAt لكل غير المقروء)
+  // ✅ تعليم الكل كمقروء
   @UseGuards(JwtAuthGuard)
   @Patch('read-all')
   async readAll(@Req() req: any) {
-    const userId =
-      req.user?.id ?? req.user?.userId ?? req.user?.sub;
-    await this.notifications.markAllAsRead(userId);
+    const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub;
+    const tenantId = req.user?.tenantId;
+    await this.notifications.markAllAsRead(userId, tenantId);
     return { ok: true };
   }
 
-  // 📣 إعلان عام (مشرف فقط) مع دعم link/channel/priority اختياريًا
+  // 📣 إعلان عام (مشرف فقط)
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Post('announce')
   async announce(
+    @Req() req: any,
     @Body()
     body: {
       title?: string;
@@ -119,11 +118,17 @@ export class NotificationsController {
     if (!title || !message) {
       throw new BadRequestException('العنوان والنص مطلوبان');
     }
-    const res = await this.notifications.announceForAll(title, message, {
-      link: body.link,
-      channel: body.channel,
-      priority: body.priority,
-    });
+    const tenantId = req.user?.tenantId;
+    const res = await this.notifications.announceForAll(
+      tenantId,
+      title,
+      message,
+      {
+        link: body.link,
+        channel: body.channel,
+        priority: body.priority,
+      },
+    );
     return { ok: true, created: res.count };
   }
 }

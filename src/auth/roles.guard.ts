@@ -16,7 +16,13 @@ export class RolesGuard implements CanActivate {
     const user = request.user;
 
     if (!user || !user.role) {
-      return false;
+      return false; // إذا كان المستخدم أو الدور مفقودين
+    }
+
+    // السماح للمطوّر ومالك النسخة بعدم وجود tenantId
+    const globalRoles = [UserRole.DEVELOPER, UserRole.INSTANCE_OWNER];
+    if (!user.tenantId && !globalRoles.includes(user.role)) {
+      return false; // المستخدمون العاديون يحتاجون tenantId
     }
 
     return requiredRoles.includes(user.role);

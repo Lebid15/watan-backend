@@ -1,11 +1,16 @@
-import { Entity, PrimaryGeneratedColumn, Column } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, Index } from 'typeorm';
 
 @Entity('currencies')
+@Index(['tenantId', 'code'], { unique: true }) // كود العملة فريد داخل نفس المستأجر
 export class Currency {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ unique: true })
+  @Column('uuid')
+  @Index() // لتسريع الفلترة حسب المستأجر
+  tenantId: string;
+
+  @Column() // أزلنا unique المنفرد لأن الفريدة أصبحت مركّبة مع tenantId
   code: string; // مثال: USD, TRY, SYP
 
   @Column()
@@ -18,8 +23,8 @@ export class Currency {
   isActive: boolean; // لتفعيل/تعطيل العملة
 
   @Column({ default: false })
-  isPrimary: boolean; // هل هي العملة الأساسية
-
+  isPrimary: boolean; // هل هي العملة الأساسية (نضمن واحدة فقط لكل tenant عبر إندكس جزئي)
+  
   @Column({ nullable: true })
   symbolAr: string; // الرمز العربي — مثال: "ل.س", "د.إ"
 }

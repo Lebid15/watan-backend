@@ -1,4 +1,4 @@
-import { Injectable, ConflictException } from '@nestjs/common';
+import { Injectable, ConflictException, BadRequestException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 type PeriodStatus = 'open' | 'closed';
@@ -12,38 +12,50 @@ export class AccountingPeriodsService {
     return { year: dt.getUTCFullYear(), month: dt.getUTCMonth() + 1 };
   }
 
-  async isClosed(date: Date): Promise<boolean> {
+  /** هل الشهر مُقفَل لهذا المستأجر؟ */
+  async isClosed(tenantId: string, date: Date): Promise<boolean> {
+    if (!tenantId) throw new BadRequestException('tenantId is required');
     const { year, month } = this.ymFromDate(date);
     const rows = await this.ds.query(
-      `SELECT status FROM accounting_periods WHERE year = $1 AND month = $2 LIMIT 1`,
-      [year, month],
+      `SELECT status
+         FROM accounting_periods
+        WHERE "tenantId" = $1 AND year = $2 AND month = $3
+        LIMIT 1`,
+      [tenantId, year, month],
     );
     const status: PeriodStatus = rows?.[0]?.status ?? 'open';
     return status === 'closed';
   }
 
-  async closeMonth(year: number, month: number, by?: string, note?: string) {
+  /** إقفال شهر محدد لهذا المستأجر */
+  async closeMonth(tenantId: string, year: number, month: number, by?: string, note?: string) {
+    if (!tenantId) throw new BadRequestException('tenantId is required');
     await this.ds.query(
       `
-      INSERT INTO accounting_periods (year, month, status, "closedAt", "closedBy", note)
-      VALUES ($1, $2, 'closed', NOW(), $3, $4)
-      ON CONFLICT (year, month)
-      DO UPDATE SET status='closed', "closedAt" = NOW(), "closedBy" = $3, note = COALESCE($4, accounting_periods.note)
+      INSERT INTO accounting_periods ("tenantId", year, month, status, "closedAt", "closedBy", note)
+      VALUES ($1, $2, $3, 'closed', NOW(), $4, $5)
+      ON CONFLICT ("tenantId", year, month)
+      DO UPDATE SET
+        status   = 'closed',
+        "closedAt" = NOW(),
+        "closedBy" = $4,
+        note     = COALESCE($5, accounting_periods.note)
       `,
-      [year, month, by ?? null, note ?? null],
+      [tenantId, year, month, by ?? null, note ?? null],
     );
   }
 
-  async closePreviousMonth(by?: string, note?: string) {
+  /** إقفال الشهر السابق */
+  async closePreviousMonth(tenantId: string, by?: string, note?: string) {
     const now = new Date();
     const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-    await this.closeMonth(prev.getUTCFullYear(), prev.getUTCMonth() + 1, by, note);
+    await this.closeMonth(tenantId, prev.getUTCFullYear(), prev.getUTCMonth() + 1, by, note);
   }
 
   /** يمنع تعديل طلب معتمد يقع ضمن شهر مُقفَل */
-  async assertApprovedMonthOpen(approvedLocalDate?: Date | null) {
+  async assertApprovedMonthOpen(tenantId: string, approvedLocalDate?: Date | null) {
     if (!approvedLocalDate) return; // غير معتمد بعد → لا منع
-    if (await this.isClosed(approvedLocalDate)) {
+    if (await this.isClosed(tenantId, approvedLocalDate)) {
       throw new ConflictException('الفترة محاسبيًا مُقفَلة — لا يمكن تعديل طلبات هذا الشهر');
     }
   }

@@ -1,13 +1,19 @@
-import { Entity, PrimaryGeneratedColumn, Column, OneToMany } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, OneToMany, Index } from 'typeorm';
 import { PackagePrice } from './package-price.entity';
 import { User } from '../user/user.entity';
 
 @Entity('price_groups')
+@Index('ux_price_groups_name_tenant', ['tenantId', 'name'], { unique: true })
 export class PriceGroup {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ unique: true })
+  // 🔑 ربط بالـ Tenant
+  @Column('uuid')
+  @Index()
+  tenantId: string;
+
+  @Column()
   name: string; // مثال: "غالي", "رخيص", "VIP"
 
   @Column({ default: true })

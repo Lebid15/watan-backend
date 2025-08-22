@@ -7,16 +7,27 @@ import {
   UpdateDateColumn,
   ManyToOne,
   JoinColumn,
+  Index,
 } from 'typeorm';
 import { PriceGroup } from '../products/price-group.entity';
 import { Currency } from '../currencies/currency.entity';
+import { Tenant } from '../tenants/tenant.entity';
 
 @Entity('users')
+@Index('idx_users_tenant', ['tenantId'])
+@Index('uniq_users_tenant_email', ['tenantId', 'email'], { unique: true })
 export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  // 🔹 العلاقة مع المشرف
+  // 🔹 بعض المستخدمين (مثل INSTANCE_OWNER) ممكن ما يكون عندهم tenantId
+  @Column({ type: 'uuid', nullable: true })
+  tenantId: string | null;
+
+  @ManyToOne(() => Tenant, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'tenantId' })
+  tenant: Tenant;
+
   @Column({ type: 'uuid', nullable: true })
   adminId?: string | null;
 
@@ -24,7 +35,7 @@ export class User {
   @JoinColumn({ name: 'adminId' })
   admin?: User | null;
 
-  @Column({ unique: true })
+  @Column()
   email: string;
 
   @Column()

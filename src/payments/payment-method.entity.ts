@@ -1,17 +1,29 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  Index,
+} from 'typeorm';
 
 export enum PaymentMethodType {
-  CASH_BOX = 'CASH_BOX',          // صندوق اعتماد
-  BANK_ACCOUNT = 'BANK_ACCOUNT',  // حساب بنكي
-  HAND_DELIVERY = 'HAND_DELIVERY',// تسليم باليد
-  USDT = 'USDT',                  // عملة USDT
+  CASH_BOX = 'CASH_BOX',             // صندوق اعتماد
+  BANK_ACCOUNT = 'BANK_ACCOUNT',     // حساب بنكي
+  HAND_DELIVERY = 'HAND_DELIVERY',   // تسليم باليد
+  USDT = 'USDT',                     // عملة USDT
   MONEY_TRANSFER = 'MONEY_TRANSFER', // حوالات مالية
 }
 
 @Entity({ name: 'payment_method' })
+@Index(['tenantId', 'name'], { unique: true }) // اسم وسيلة الدفع فريد داخل المستأجر
 export class PaymentMethod {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  @Column('uuid')
+  @Index()
+  tenantId: string;
 
   /** اسم وسيلة الدفع الذي سيظهر للمستخدم */
   @Column({ type: 'varchar', length: 150 })
@@ -34,12 +46,7 @@ export class PaymentMethod {
   isActive: boolean;
 
   /**
-   * حقول الديناميكية الخاصة بكل نوع، مثال:
-   * - CASH_BOX: { boxName, note }
-   * - BANK_ACCOUNT: { bankName, accountHolder, iban, note }
-   * - HAND_DELIVERY: { delegateName, note }
-   * - USDT: { addressOrIban, note }
-   * - MONEY_TRANSFER: { recipientName, destination, officeName, note }
+   * الحقول الديناميكية الخاصة بكل نوع
    */
   @Column({ type: 'jsonb', default: {} })
   config: Record<string, any>;

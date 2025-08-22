@@ -4,9 +4,11 @@ import {
   Query,
   UseGuards,
   BadRequestException,
-  Patch, 
+  Patch,
   ParseIntPipe,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express'; // ✅ type-only لتفادي TS1272
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Brackets } from 'typeorm';
 import { ProductOrder } from '../products/product-order.entity';
@@ -17,7 +19,6 @@ import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { UserRole } from '../auth/user-role.enum';
 import { AccountingPeriodsService } from '../accounting/accounting-periods.service';
-
 
 const _fmtTR = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Europe/Istanbul',
@@ -67,7 +68,17 @@ export class ReportsAdminController {
     private readonly accounting: AccountingPeriodsService,
   ) {}
 
-  /* ============== Helpers (providers) ============== */
+  /* ============== Helpers ============== */
+  private getTenantId(req: Request): string {
+    const fromUser = (req as any)?.user?.tenantId as string | undefined;
+  const fromTenant = (req as any)?.tenant?.id as string | undefined;
+    const fromHeader = (req.headers['x-tenant-id'] as string | undefined) || undefined;
+    const fromQuery = (req.query?.tenantId as string | undefined) || undefined;
+  const tenantId = fromUser || fromTenant || fromHeader || fromQuery;
+    if (!tenantId) throw new BadRequestException('tenantId is required');
+    return tenantId;
+  }
+
   private async getTableColumns(table: string): Promise<Set<string>> {
     const rows = await this.ordersRepo.manager.query(
       `SELECT column_name
@@ -78,7 +89,7 @@ export class ReportsAdminController {
     return new Set<string>((rows || []).map((r: any) => String(r.column_name).toLowerCase()));
   }
 
-  private async readProvidersFromAnyTable(): Promise<Array<{ id: string; label: string }>> {
+  private async readProvidersFromAnyTable(tenantId: string): Promise<Array<{ id: string; label: string }>> {
     for (const table of PROVIDER_TABLE_CANDIDATES) {
       try {
         const cols = await this.getTableColumns(table);
@@ -86,9 +97,18 @@ export class ReportsAdminController {
         const labelCol = PROVIDER_LABEL_CANDIDATE_COLUMNS.find((c) => cols.has(c));
         if (!labelCol) continue;
 
-        const rows = await this.ordersRepo.manager.query(
-          `SELECT id, ${labelCol} AS label FROM ${table}`,
-        );
+        let rows: any[] = [];
+        if (cols.has('tenantid')) {
+          rows = await this.ordersRepo.manager.query(
+            `SELECT id, ${labelCol} AS label FROM ${table} WHERE "tenantId" = $1`,
+            [tenantId],
+          );
+        } else {
+          rows = await this.ordersRepo.manager.query(
+            `SELECT id, ${labelCol} AS label FROM ${table}`,
+          );
+        }
+
         const mapped = (rows || [])
           .filter((r: any) => r?.id)
           .map((r: any) => ({
@@ -100,19 +120,26 @@ export class ReportsAdminController {
     }
     return [];
   }
-  /* ================================================ */
+  /* ===================================== */
 
   /** بحث المستخدمين (ID + label) */
   @Get('users')
-  async searchUsers(@Query('q') q = '', @Query('limit') limit = '20') {
+  async searchUsers(
+    @Req() req: Request,
+    @Query('q') q = '',
+    @Query('limit') limit = '20',
+  ) {
+    const tenantId = this.getTenantId(req);
     const take = Math.max(1, Math.min(50, Number(limit) || 20));
+
     const qb = this.usersRepo.createQueryBuilder('u')
       .select(['u.id AS id', `CONCAT(COALESCE(u.username,''),' — ',COALESCE(u.email,'')) AS label`])
+      .where(`"u"."tenantId" = :tenantId`, { tenantId }) // ✅ scope
       .orderBy('u.createdAt', 'DESC')
       .take(take);
 
     if (q && q.trim()) {
-      qb.where(new Brackets(b => {
+      qb.andWhere(new Brackets(b => {
         b.where(`LOWER(u.username) LIKE :q`, { q: `%${q.toLowerCase()}%` })
          .orWhere(`LOWER(u.email) LIKE :q`,   { q: `%${q.toLowerCase()}%` });
       }));
@@ -122,14 +149,17 @@ export class ReportsAdminController {
 
   /** قائمة المزوّدين (اسم ودّي إن وُجد) */
   @Get('providers')
-  async listProviders() {
-    const fromTables = await this.readProvidersFromAnyTable();
+  async listProviders(@Req() req: Request) {
+    const tenantId = this.getTenantId(req);
+
+    const fromTables = await this.readProvidersFromAnyTable(tenantId);
     const map = new Map<string, string>();
     for (const r of fromTables) map.set(r.id, r.label);
 
     const rowsFromOrders = await this.ordersRepo.createQueryBuilder('o')
       .select('DISTINCT "o"."providerId"', 'providerId')
-      .where(`"o"."providerId" IS NOT NULL`)
+      .where(`"o"."tenantId" = :tenantId`, { tenantId })    // ✅ scope
+      .andWhere(`"o"."providerId" IS NOT NULL`)
       .andWhere(`"o"."providerId" <> ''`)
       .orderBy(`"o"."providerId"`, 'ASC')
       .getRawMany<{ providerId: string }>();
@@ -152,20 +182,24 @@ export class ReportsAdminController {
   /** تقرير الأرباح — يعتمد القيم المجمّدة + approvedLocalDate */
   @Get('profits')
   async getProfits(
+    @Req() req: Request,
     @Query('range') range: RangePreset = 'today',
     @Query('start') start?: string,
     @Query('end') end?: string,
     @Query('userId') userId?: string,
     @Query('provider') provider?: string,
   ) {
+    const tenantId = this.getTenantId(req);
+
     // 1) userId → UUID (كما هو)
     let userUUID: string | undefined = userId;
     if (userId && !UUID_RE.test(userId)) {
       const u = await this.usersRepo.createQueryBuilder('u')
         .select(['u.id'])
-        .where(new Brackets(b => {
+        .where(`"u"."tenantId" = :tenantId`, { tenantId }) // ✅ scope
+        .andWhere(new Brackets(b => {
           b.where(`LOWER(u.username) = :x`, { x: userId.toLowerCase() })
-          .orWhere(`LOWER(u.email) = :x`,   { x: userId.toLowerCase() });
+           .orWhere(`LOWER(u.email) = :x`,   { x: userId.toLowerCase() });
         }))
         .getOne();
       userUUID = u?.id || undefined;
@@ -189,8 +223,10 @@ export class ReportsAdminController {
       startAt = startOfToday(); endAt = endOfToday();
     }
 
-    // 3) سعر TRY لكل 1 USD (لإرجاع profit بالدولار إن أردت عرضه)
-    const tryCurrency = await this.currencyRepo.findOne({ where: { code: 'TRY', isActive: true } });
+    // 3) سعر TRY لكل 1 USD (مُScoped)
+    const tryCurrency = await this.currencyRepo.findOne({
+      where: { code: 'TRY', isActive: true, tenantId }, // ✅ scope
+    });
     if (!tryCurrency || !tryCurrency.rate) throw new BadRequestException('TRY currency rate not configured.');
     const tryPerUsd = Number(tryCurrency.rate);
 
@@ -206,17 +242,18 @@ export class ReportsAdminController {
       }
     };
 
-    // 5) العدّادات تَبقى كما هي (على createdAt) لتجنّب تغيير السلوك الآن
+    // 5) العدّادات (createdAt) — مع tenant
     const countsQb = this.ordersRepo.createQueryBuilder('o')
       .select('COUNT(*)', 'total')
       .addSelect(`SUM(CASE WHEN "o"."status" = 'approved' THEN 1 ELSE 0 END)`, 'approved')
       .addSelect(`SUM(CASE WHEN "o"."status" = 'rejected' THEN 1 ELSE 0 END)`, 'rejected')
-      .where(`"o"."createdAt" BETWEEN :start AND :end`, { start: startAt, end: endAt });
+      .where(`"o"."tenantId" = :tenantId`, { tenantId })      // ✅ scope
+      .andWhere(`"o"."createdAt" BETWEEN :start AND :end`, { start: startAt, end: endAt });
     if (userUUID) countsQb.andWhere(`"o"."userId" = :userId`, { userId: userUUID });
     providerFilter(countsQb);
     const countsRow = await countsQb.getRawOne<{ total: string; approved: string; rejected: string }>();
 
-    // 6) الإجماليات — من القيم المجمّدة + approvedLocalDate
+    // 6) الإجماليات — من القيم المجمّدة + approvedLocalDate (مع tenant)
     const approvedQb = this.ordersRepo.createQueryBuilder('o')
       .select(`SUM(COALESCE("o"."sellTryAtApproval", 0))`, 'salesTry')
       .addSelect(`SUM(COALESCE("o"."costTryAtApproval", 0))`, 'costTry')
@@ -236,7 +273,8 @@ export class ReportsAdminController {
         `,
         'profitUsd'
       )
-      .where(`"o"."status" = 'approved'`)
+      .where(`"o"."tenantId" = :tenantId`, { tenantId })      // ✅ scope
+      .andWhere(`"o"."status" = 'approved'`)
       .andWhere(`"o"."approvedLocalDate" BETWEEN :start AND :end`, { start: startAt, end: endAt });
     if (userUUID) approvedQb.andWhere(`"o"."userId" = :userId`, { userId: userUUID });
     providerFilter(approvedQb);
@@ -275,9 +313,12 @@ export class ReportsAdminController {
 
   @Get('profits/by-provider')
   async getProfitByProvider(
+    @Req() req: Request,
     @Query('start') start: string,
     @Query('end') end: string,
   ) {
+    const tenantId = this.getTenantId(req);
+
     if (!start || !end) throw new BadRequestException('start & end are required (YYYY-MM-DD)');
 
     const startAt = parseDateOnly(start); startAt.setHours(0,0,0,0);
@@ -288,7 +329,8 @@ export class ReportsAdminController {
       .addSelect(`SUM(COALESCE("o"."sellTryAtApproval", 0))`, 'salesTry')
       .addSelect(`SUM(COALESCE("o"."costTryAtApproval", 0))`, 'costTry')
       .addSelect(`SUM(COALESCE("o"."sellTryAtApproval", 0) - COALESCE("o"."costTryAtApproval", 0))`, 'profitTry')
-      .where(`"o"."status" = 'approved'`)
+      .where(`"o"."tenantId" = :tenantId`, { tenantId })    // ✅ scope
+      .andWhere(`"o"."status" = 'approved'`)
       .andWhere(`"o"."approvedLocalDate" BETWEEN :start AND :end`, { start: startAt, end: endAt })
       .groupBy(`COALESCE(NULLIF("o"."providerId", ''), 'manual')`)
       .orderBy(`profitTry`, 'ASC')
@@ -306,19 +348,18 @@ export class ReportsAdminController {
 
   @Patch('accounting/close')
   async closeMonth(
+    @Req() req: Request,
     @Query('year', new ParseIntPipe()) year: number,
     @Query('month', new ParseIntPipe()) month: number,
     @Query('note') note?: string,
   ) {
-    await this.accounting.closeMonth(year, month, undefined, note);
+    await this.accounting.closeMonth(this.getTenantId(req), year, month, undefined, note);
     return { message: 'closed', year, month };
   }
 
   @Patch('accounting/close-previous')
-  async closePrev(@Query('note') note?: string) {
-    await this.accounting.closePreviousMonth(undefined, note);
+  async closePrev(@Req() req: Request, @Query('note') note?: string) {
+    await this.accounting.closePreviousMonth(this.getTenantId(req), undefined, note);
     return { message: 'closed_previous' };
   }
-
-
 }

@@ -1,12 +1,26 @@
-import { Column, CreateDateColumn, Entity, Index, OneToMany, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  OneToMany,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 import { CatalogPackage } from './catalog-package.entity';
 
 export type CatalogSourceType = 'external' | 'internal';
 
 @Entity('catalog_product')
+@Index(['tenantId', 'name']) // كل منتج مرتبط بمستأجر
 export class CatalogProduct {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // 🔹 tenantId إجباري
+  @Column({ type: 'uuid', nullable: false })
+  @Index()
+  tenantId: string;
 
   @Column({ length: 200 })
   @Index()

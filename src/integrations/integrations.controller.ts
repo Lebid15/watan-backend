@@ -1,5 +1,16 @@
 // src/integrations/integrations.controller.ts
-import { Body, Controller, Get, Put, Delete, Param, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Put,
+  Delete,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { IntegrationsService } from './integrations.service';
 import { CreateIntegrationDto } from './dto/create-integration.dto';
 import { UpdateIntegrationDto } from './dto/update-integration.dto';
@@ -15,101 +26,139 @@ import { UserRole } from '../auth/user-role.enum';
 export class IntegrationsController {
   constructor(private readonly svc: IntegrationsService) {}
 
+  /** استخراج tenantId من الطلب (JWT أو الهيدر الاحتياطي) */
+  private getTenantId(req: any): string {
+  const fromUser = req?.user?.tenantId ?? req?.user?.tenant_id;
+  const fromTenant = req?.tenant?.id; // middleware
+    const fromHeader =
+      req?.headers?.['x-tenant-id'] ??
+      req?.headers?.['X-Tenant-Id'] ??
+      req?.headers?.['x-tenantid'];
+  return String(fromUser ?? fromTenant ?? fromHeader ?? '').trim();
+  }
+
   @Post()
-  create(@Body() dto: CreateIntegrationDto) {
+  create(@Req() req: any, @Body() dto: CreateIntegrationDto) {
+    const tenantId = this.getTenantId(req);
     // أي إنشاء من صفحة المشرف = tenant
-    return this.svc.create({ ...dto, scope: 'tenant' } as any);   // ← CHANGED
+    return this.svc.create(tenantId, { ...dto, scope: 'tenant' } as any);
   }
 
   @Get()
-  list() {
+  list(@Req() req: any) {
+    const tenantId = this.getTenantId(req);
     // لا نعرض dev هنا
-    return this.svc.list('tenant');                               // ← CHANGED
+    return this.svc.list(tenantId, 'tenant');
   }
 
-  // ⬇️ جديد: جلب مزود واحد بالتعريف
+  // ⬇️ جلب مزود واحد بالتعريف
   @Get(':id')
-  getOne(@Param('id') id: string) {
-    return this.svc.get(id);
+  getOne(@Req() req: any, @Param('id') id: string) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.get(id, tenantId);
   }
 
-  // ⬇️ جديد: تعديل مزود
+  // ⬇️ تعديل مزود
   @Put(':id')
-  updateOne(@Param('id') id: string, @Body() dto: UpdateIntegrationDto) {
-    return this.svc.updateIntegration(id, dto);
+  updateOne(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateIntegrationDto) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.updateIntegration(id, tenantId, dto as any);
   }
 
-  // ⬇️ جديد: حذف مزود
+  // ⬇️ حذف مزود
   @Delete(':id')
-  deleteOne(@Param('id') id: string) {
-    return this.svc.deleteIntegration(id);
+  deleteOne(@Req() req: any, @Param('id') id: string) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.deleteIntegration(tenantId, id);
   }
 
   @Post(':id/test')
-  test(@Param('id') id: string) {
-    return this.svc.testConnection(id);
+  test(@Req() req: any, @Param('id') id: string) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.testConnection(id, tenantId);
   }
 
   @Post(':id/refresh-balance')
-  refresh(@Param('id') id: string) {
-    return this.svc.refreshBalance(id);
+  refresh(@Req() req: any, @Param('id') id: string) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.refreshBalance(id, tenantId);
   }
 
   @Post(':id/sync-products')
-  sync(@Param('id') id: string) {
-    return this.svc.syncProducts(id);
+  sync(@Req() req: any, @Param('id') id: string) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.syncProducts(id, tenantId);
   }
 
   @Post(':id/orders')
-  place(@Param('id') id: string, @Body() dto: PlaceOrderDto) {
-    return this.svc.placeOrder(id, dto);
+  place(@Req() req: any, @Param('id') id: string, @Body() dto: PlaceOrderDto) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.placeOrder(id, tenantId, dto as any);
   }
 
   @Get(':id/orders/status')
-  status(@Param('id') id: string, @Query('ids') ids: string) {
-    const arr = (ids || '').split(',').map((s) => s.trim()).filter(Boolean);
-    return this.svc.checkOrders(id, arr);
+  status(@Req() req: any, @Param('id') id: string, @Query('ids') ids: string) {
+    const tenantId = this.getTenantId(req);
+    const arr = (ids || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return this.svc.checkOrders(id, tenantId, arr);
   }
 
   @Get(':id/packages')
-  getPackages(@Param('id') id: string, @Query('product') product?: string) {
-    return this.svc.getIntegrationPackages(id, product);
+  getPackages(@Req() req: any, @Param('id') id: string, @Query('product') product?: string) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.getIntegrationPackages(id, tenantId, product);
   }
 
   @Post(':id/packages')
   saveMappings(
+    @Req() req: any,
     @Param('id') id: string,
     @Body() body: { our_package_id: string; provider_package_id: string }[],
   ) {
-    return this.svc.savePackageMappings(id, body);
+    const tenantId = this.getTenantId(req);
+    return this.svc.savePackageMappings(tenantId, id, body);
   }
 
   // ===== توجيه الباقات / التكاليف
   @Get('routing/all')
-  getRoutingAll(@Query('q') q?: string) {
-    return this.svc.getRoutingAll(q);
+  getRoutingAll(@Req() req: any, @Query('q') q?: string) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.getRoutingAll(tenantId, q);
   }
 
   @Post('routing/set')
   setRoutingField(
+    @Req() req: any,
     @Body() body: { packageId: string; which: 'primary' | 'fallback'; providerId: string | null },
   ) {
-    return this.svc.setRoutingField(body.packageId, body.which, body.providerId);
+    const tenantId = this.getTenantId(req);
+    return this.svc.setRoutingField(tenantId, body.packageId, body.which, body.providerId);
   }
 
   @Post('provider-cost')
-  refreshProviderCost(@Body() body: { packageId: string; providerId: string }) {
-    return this.svc.refreshProviderCost(body.packageId, body.providerId);
+  refreshProviderCost(@Req() req: any, @Body() body: { packageId: string; providerId: string }) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.refreshProviderCost(tenantId, body.packageId, body.providerId);
   }
 
   @Post('routing/set-type')
-  setRoutingType(@Body() body: { packageId: string; providerType: 'manual' | 'external' | 'internal_codes' }) {
-    return this.svc.setRoutingType(body.packageId, body.providerType);
+  setRoutingType(
+    @Req() req: any,
+    @Body() body: { packageId: string; providerType: 'manual' | 'external' | 'internal_codes' },
+  ) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.setRoutingType(tenantId, body.packageId, body.providerType);
   }
 
   @Post('routing/set-code-group')
-  setRoutingCodeGroup(@Body() body: { packageId: string; codeGroupId: string | null }) {
-    return this.svc.setRoutingCodeGroup(body.packageId, body.codeGroupId);
+  setRoutingCodeGroup(
+    @Req() req: any,
+    @Body() body: { packageId: string; codeGroupId: string | null },
+  ) {
+    const tenantId = this.getTenantId(req);
+    return this.svc.setRoutingCodeGroup(tenantId, body.packageId, body.codeGroupId);
   }
-
 }

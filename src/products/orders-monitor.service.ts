@@ -49,7 +49,16 @@ export class OrdersMonitorService {
           continue;
         }
 
-        const res = await this.integrations.checkOrders(order.providerId, [order.externalOrderId]);
+        const tenantId =
+        (order as any)?.tenantId ??
+        (order as any)?.user?.tenantId ??
+        '';
+
+      const res = await this.integrations.checkOrders(
+        order.providerId,
+        tenantId,
+        [order.externalOrderId],
+      );
         const first = Array.isArray(res) ? res[0] : (res as any);
 
         // ===================== استخراج الحالة/الملاحظة/PIN =====================

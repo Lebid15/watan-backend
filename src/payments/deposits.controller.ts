@@ -8,38 +8,37 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 export class DepositsController {
   constructor(private readonly service: DepositsService) {}
 
-  /**
-   * ✅ جديد: يُرجع { items, pageInfo } مع دعم limit/cursor
-   * - متوافق مع الواجهة الحالية في /wallet
-   * - يشتغل أيضًا كبديل عن GET /deposits (المسار بدون /mine)
-   */
+  /** ✅ جديد: {items, pageInfo} */
   @Get('mine')
   async myDepositsPaginated(
     @Req() req: any,
     @Query('limit') limitQ?: string,
     @Query('cursor') cursor?: string,
   ) {
-    const userId = req.user?.userId ?? req.user?.sub ?? req.user?.id;
+    const userId   = req.user?.userId ?? req.user?.sub ?? req.user?.id;
+    const tenantId = req.user?.tenantId as string;
     const limit = Math.max(1, Math.min(100, Number(limitQ ?? 20)));
-    return this.service.listMineWithPagination(userId, { limit, cursor: cursor ?? null });
+    return this.service.listMineWithPagination(userId, tenantId, { limit, cursor: cursor ?? null });
   }
 
-  /** 🔁 alias: يُرجع نفس نتيجة /deposits/mine */
+  /** 🔁 alias: يعيد نفس نتيجة /deposits/mine */
   @Get()
   async myDepositsAlias(
     @Req() req: any,
     @Query('limit') limitQ?: string,
     @Query('cursor') cursor?: string,
   ) {
-    const userId = req.user?.userId ?? req.user?.sub ?? req.user?.id;
+    const userId   = req.user?.userId ?? req.user?.sub ?? req.user?.id;
+    const tenantId = req.user?.tenantId as string;
     const limit = Math.max(1, Math.min(100, Number(limitQ ?? 20)));
-    return this.service.listMineWithPagination(userId, { limit, cursor: cursor ?? null });
+    return this.service.listMineWithPagination(userId, tenantId, { limit, cursor: cursor ?? null });
   }
 
   /** إنشاء طلب إيداع */
   @Post()
   create(@Req() req: any, @Body() dto: CreateDepositDto) {
-    const userId = req.user?.userId ?? req.user?.sub ?? req.user?.id;
-    return this.service.createDeposit(userId, dto);
+    const userId   = req.user?.userId ?? req.user?.sub ?? req.user?.id;
+    const tenantId = req.user?.tenantId as string;
+    return this.service.createDeposit(userId, tenantId, dto);
   }
 }

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, UseGuards, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, UseGuards, Query, Req } from '@nestjs/common';
 import { DepositsService } from './deposits.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -15,12 +15,14 @@ export class DepositsAdminController {
 
   /** GET /admin/deposits?limit=&cursor=&q=&status=&methodId=&from=&to= */
   @Get()
-  list(@Query() query: ListDepositsDto) {
-    return this.depositsService.listWithPagination(query);
+  list(@Req() req: any, @Query() query: ListDepositsDto) {
+    const tenantId = req.user?.tenantId as string;
+    return this.depositsService.listWithPagination(query, tenantId);
   }
 
   @Patch(':id/status')
-  setStatus(@Param('id') id: string, @Body() dto: UpdateDepositStatusDto) {
-    return this.depositsService.setStatus(id, dto.status);
+  setStatus(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateDepositStatusDto) {
+    const tenantId = req.user?.tenantId as string;
+    return this.depositsService.setStatus(id, tenantId, dto.status);
   }
 }

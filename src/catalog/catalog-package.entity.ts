@@ -1,11 +1,26 @@
-import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  JoinColumn,
+  ManyToOne,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 import { CatalogProduct } from './catalog-product.entity';
 
 @Entity('catalog_package')
-@Index(['sourceProviderId', 'externalPackageId'], { unique: false })
+@Index(['tenantId', 'sourceProviderId', 'externalPackageId'])
+@Index(['tenantId', 'publicCode'], { unique: true }) // فريد داخل المستأجر
 export class CatalogPackage {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // 🔹 tenantId إجباري
+  @Column({ type: 'uuid', nullable: false })
+  @Index()
+  tenantId: string;
 
   @ManyToOne(() => CatalogProduct, (p) => p.packages, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'catalogProductId' })
@@ -18,8 +33,8 @@ export class CatalogPackage {
   @Column({ length: 200 })
   name: string;
 
-  // كود عام للربط الخارجي داخل المنصة
-  @Column({ type: 'varchar', length: 120, unique: true })
+  // كود عام للربط — صار فريدًا لكل tenant
+  @Column({ type: 'varchar', length: 120 })
   publicCode: string;
 
   // لو خارجي

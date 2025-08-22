@@ -1,10 +1,21 @@
-import { Entity, PrimaryGeneratedColumn, Column, OneToMany } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  OneToMany,
+  Index,
+} from 'typeorm';
 import { ProductPackage } from './product-package.entity';
 
-@Entity()
+@Entity('product')
+@Index(['tenantId', 'name'], { unique: true }) // اسم المنتج فريد داخل نفس الـ tenant
 export class Product {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  @Column('uuid')
+  @Index()
+  tenantId: string;
 
   @Column()
   name: string;

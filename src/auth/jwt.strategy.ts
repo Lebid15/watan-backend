@@ -1,13 +1,11 @@
-// src/auth/jwt.strategy.ts
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { jwtConstants } from './constants';
-import { UserService } from '../user/user.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(private readonly userService: UserService) {
+  constructor() {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
@@ -16,21 +14,20 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
-    if (!payload.sub) {
-      throw new UnauthorizedException('Invalid token payload: missing sub');
+    if (!payload?.sub) {
+      throw new UnauthorizedException('بيانات التوكن غير صالحة: sub مفقود');
     }
-
-    const user = await this.userService.findById(payload.sub, ['currency']);
-    if (!user) {
-      throw new UnauthorizedException('User not found');
+    const role = (payload.role || 'user').toString().toLowerCase();
+    const allowsNullTenant = ['instance_owner', 'developer'].includes(role);
+    if (!payload.tenantId && !allowsNullTenant) {
+      throw new UnauthorizedException('بيانات التوكن غير صالحة: tenantId مفقود لهذا الدور');
     }
-
-    // نرجع بيانات محددة فقط
     return {
-      id: user.id, // UUID صحيح من قاعدة البيانات
-      email: user.email,
-      role: user.role,
-      currencyId: user.currency?.id || null,
+      id: payload.sub,
+      sub: payload.sub,
+      email: payload.email,
+      role,
+      tenantId: payload.tenantId ?? null,
     };
   }
 }

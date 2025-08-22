@@ -1,15 +1,27 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn,
-  ManyToOne, JoinColumn, Index
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
+  Index,
 } from 'typeorm';
 import { CodeGroup } from './code-group.entity';
 
 export type CodeStatus = 'available' | 'reserved' | 'used' | 'disabled';
 
 @Entity('code_item')
+@Index(['tenantId', 'groupId']) // بحث أسرع داخل مجموعة ضمن نفس المستأجر
 export class CodeItem {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // 🔑 كل كود تابع لمستأجر معيّن
+  @Column({ type: 'uuid', nullable: false })
+  @Index()
+  tenantId: string;
 
   @ManyToOne(() => CodeGroup, (g) => g.items, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'groupId' })

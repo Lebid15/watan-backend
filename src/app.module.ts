@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, MiddlewareConsumer, NestModule, RequestMethod } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ServeStaticModule } from '@nestjs/serve-static';
@@ -13,51 +13,45 @@ import { CurrenciesModule } from './currencies/currencies.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { PaymentsModule } from './payments/payments.module';
 import { CodesModule } from './codes/codes.module';
+import { TenantsModule } from './tenants/tenants.module';
+
+import { Tenant } from './tenants/tenant.entity';
+import { TenantDomain } from './tenants/tenant-domain.entity';
+import { TenantContextMiddleware } from './tenants/tenant-context.middleware';
 
 @Module({
   imports: [
-    // تقديم الملفات الثابتة (تفيد محليًا لو استخدمت تخزين ملفات على القرص)
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', 'uploads'),
       serveRoot: '/uploads',
     }),
-
-    // متغيرات البيئة: يقرأ .env.local أولًا ثم .env
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ['.env.local', '.env'],
     }),
-
-    // إعداد TypeORM مع دعم SSL في الإنتاج (مثل Render)
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
         const databaseUrl = config.get<string>('DATABASE_URL');
+        console.log("Connecting to database with URL:", databaseUrl);  // Check the DB URL here
         if (!databaseUrl) {
           throw new Error('DATABASE_URL is not defined');
         }
-
-        const nodeEnv = config.get<string>('NODE_ENV') || 'production';
+        const nodeEnv = config.get<string>('NODE_ENV') || 'development';
         const isProd = nodeEnv === 'production';
-
         return {
-          type: 'postgres' as const,
+          type: 'postgres',
           url: databaseUrl,
           autoLoadEntities: true,
-          synchronize: true, // عطّلها في الإنتاج إذا تعتمد على migrations
-          // في Render وبعض مزودي Postgres يلزم SSL:
+          synchronize: !isProd,
           ssl: isProd ? { rejectUnauthorized: false } : false,
           extra: isProd ? { ssl: { rejectUnauthorized: false } } : undefined,
           logging: ['error'],
         };
       },
     }),
-
-    // للمهام المجدولة إن احتجتها
     ScheduleModule.forRoot(),
-
-    // بقية الموديولات
     UserModule,
     AuthModule,
     AdminModule,
@@ -66,6 +60,14 @@ import { CodesModule } from './codes/codes.module';
     PaymentsModule,
     IntegrationsModule,
     CodesModule,
+    TenantsModule,
+    TypeOrmModule.forFeature([Tenant, TenantDomain]),
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(TenantContextMiddleware)
+      .forRoutes({ path: '*path', method: RequestMethod.ALL });
+  }
+}

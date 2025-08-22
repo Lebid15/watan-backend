@@ -1,3 +1,4 @@
+// src/products/package-prices.controller.ts
 import {
   Controller,
   Put,
@@ -5,6 +6,7 @@ import {
   Body,
   NotFoundException,
   BadRequestException,
+  Req,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -12,6 +14,7 @@ import { validate as isUuid } from 'uuid';
 import { ProductPackage } from './product-package.entity';
 import { PackagePrice } from './package-price.entity';
 import { PriceGroup } from './price-group.entity';
+import type { Request } from 'express';
 
 interface UpdatePackagePricesDto {
   capital: number;
@@ -33,40 +36,43 @@ export class PackagePricesController {
 
   @Put(':id/prices')
   async updatePackagePrices(
+    @Req() req: Request,
     @Param('id') id: string,
     @Body() body: UpdatePackagePricesDto,
   ) {
-    // ✅ تحقق من أن الـ id صحيح
+    const tenantId = (req as any).user?.tenantId as string;
+
     if (!isUuid(id)) {
       throw new BadRequestException('معرّف الباقة غير صالح');
     }
-    
-    // ✅ جلب الباقة
-    const pkg = await this.packageRepo.findOne({ where: { id } });
+
+    // ✅ جلب الباقة ضمن نفس الـ tenant
+    const pkg = await this.packageRepo.findOne({ where: { id, tenantId } });
     if (!pkg) throw new NotFoundException('الباقة غير موجودة');
 
     // ✅ تحديث رأس المال
     pkg.capital = body.capital ?? 0;
     await this.packageRepo.save(pkg);
 
-    // ✅ تحديث الأسعار
+    // ✅ تحديث الأسعار لكل مجموعة ضمن نفس الـ tenant
     if (Array.isArray(body.prices)) {
       await Promise.all(
         body.prices.map(async ({ groupId, price }) => {
           if (!isUuid(groupId)) return;
 
-          // جلب مجموعة الأسعار
-          const group = await this.groupRepo.findOne({ where: { id: groupId } });
+          // جلب مجموعة الأسعار ضمن نفس الـ tenant
+          const group = await this.groupRepo.findOne({ where: { id: groupId, tenantId } });
           if (!group) return;
 
-          // جلب أو إنشاء السعر
+          // جلب أو إنشاء السعر (ضمن نفس الـ tenant)
           let pkgPrice = await this.priceRepo.findOne({
-            where: { package: { id: pkg.id }, priceGroup: { id: group.id } },
+            where: { tenantId, package: { id: pkg.id, tenantId }, priceGroup: { id: group.id, tenantId } },
             relations: ['package', 'priceGroup'],
           });
 
           if (!pkgPrice) {
             pkgPrice = this.priceRepo.create({
+              tenantId,
               package: pkg,
               priceGroup: group,
               price,
@@ -79,10 +85,12 @@ export class PackagePricesController {
         }),
       );
     }
+
     const updatedPrices = await this.priceRepo.find({
-      where: { package: { id: pkg.id } },
+      where: { tenantId, package: { id: pkg.id, tenantId } },
       relations: ['priceGroup'],
     });
+
     return {
       success: true,
       packageId: pkg.id,

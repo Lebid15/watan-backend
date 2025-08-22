@@ -1,9 +1,11 @@
+// backend/src/notifications/notifications.service.ts
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Brackets } from 'typeorm';
+import { Repository, In, Brackets, DeepPartial } from 'typeorm';
 import { Notification, NotificationType } from './notification.entity';
 import { User } from '../user/user.entity';
 import { decodeCursor, encodeCursor, toEpochMs } from '../utils/pagination';
+
 
 @Injectable()
 export class NotificationsService {
@@ -15,12 +17,14 @@ export class NotificationsService {
   ) {}
 
   // ========== أدوات عامة ==========
-  private async mustGetUser(userId: string): Promise<User> {
+
+  /** يجلب المستخدم ويتحقق من انتمائه للمستأجر */
+  private async mustGetUserInTenant(userId: string, tenantId: string): Promise<User> {
     const user = await this.usersRepo.findOne({
-      where: { id: userId },
+      where: { id: userId, tenantId } as any,
       relations: ['currency'],
     });
-    if (!user) throw new NotFoundException(`المستخدم ${userId} غير موجود`);
+    if (!user) throw new NotFoundException(`المستخدم غير موجود ضمن هذا المستأجر`);
     return user;
   }
 
@@ -45,9 +49,10 @@ export class NotificationsService {
     return s === 'approved' ? 'قبول' : s === 'rejected' ? 'رفض' : 'قيد المراجعة';
   }
 
-  // ========== مُنشئ تنبيه عام ==========
+  // ========== مُنشئ تنبيه عام (مع فرض المستأجر) ==========
   private async createTyped(
     userId: string,
+    tenantId: string,
     type: NotificationType,
     title: string,
     message: string,
@@ -59,24 +64,39 @@ export class NotificationsService {
       isRead?: boolean;
     },
   ): Promise<Notification> {
-    const user = await this.mustGetUser(userId);
-    const notification = this.notificationsRepo.create({
+    const user = await this.mustGetUserInTenant(userId, tenantId);
+
+    const hasTenantIdColumn =
+      !!(this.notificationsRepo?.metadata as any)?.propertiesMap &&
+      'tenantId' in (this.notificationsRepo.metadata.propertiesMap as any);
+
+    // ✅ حدّد المدخلات كـ DeepPartial<Notification>
+    const base: DeepPartial<Notification> = {
       user,
-      type,
+      type: type as any,                       // إن كان enum
       title,
       message,
       meta,
       link: opts?.link ?? null,
-      channel: opts?.channel ?? 'in_app',
-      priority: opts?.priority ?? 'normal',
+      channel: (opts?.channel ?? 'in_app') as any,   // إن كان enum
+      priority: (opts?.priority ?? 'normal') as any, // إن كان enum
       isRead: !!opts?.isRead,
       readAt: opts?.isRead ? new Date() : null,
-    });
-    return this.notificationsRepo.save(notification);
-  }
+      ...(hasTenantIdColumn ? { tenantId } : {}),
+    };
 
-  // ========== APIs أساسية ==========
-  async findByUser(userId: string): Promise<Notification[]> {
+    // ✅ create لعنصر واحد → يعيد Notification
+    const notification = this.notificationsRepo.create(base);
+
+    // ✅ ثبّت الأوفرلود الفردي صراحةً
+    const saved = await this.notificationsRepo.save<Notification>(notification);
+    return saved;
+  }
+  // ========== APIs أساسية مع فرض tenantId ==========
+
+  /** جميع التنبيهات لمستخدم ضمن نفس المستأجر (بسيط) */
+  async findByUser(userId: string, tenantId: string): Promise<Notification[]> {
+    await this.mustGetUserInTenant(userId, tenantId);
     return this.notificationsRepo.find({
       where: { user: { id: userId } },
       order: { createdAt: 'DESC' },
@@ -86,8 +106,11 @@ export class NotificationsService {
   /** واجهة مع باجينيشن (keyset) — متوافقة مع /notifications و /notifications/mine */
   async listMineWithPagination(
     userId: string,
+    tenantId: string,
     dto: { limit?: number; cursor?: string | null },
   ) {
+    await this.mustGetUserInTenant(userId, tenantId);
+
     const limit = Math.max(1, Math.min(100, Number(dto?.limit ?? 20)));
     const cursor = decodeCursor(dto?.cursor);
 
@@ -95,6 +118,7 @@ export class NotificationsService {
       .createQueryBuilder('n')
       .where('n.user_id = :uid', { uid: userId });
 
+    // Keyset: createdAt DESC, id DESC
     if (cursor) {
       qb.andWhere(new Brackets((b) => {
         b.where('n.createdAt < :cts', { cts: new Date(cursor.ts) })
@@ -118,7 +142,6 @@ export class NotificationsService {
       ? encodeCursor(toEpochMs((last as any).createdAt), String((last as any).id))
       : null;
 
-    // نعيد العناصر كما هي (الفرونت يقرأ الحقول التالية)
     const items = pageItems.map((n) => ({
       id: n.id,
       title: n.title ?? null,
@@ -135,16 +158,19 @@ export class NotificationsService {
     };
   }
 
-  /** يدعم تمرير userId اختياريًا للتحقق من الملكية دون كسر التوافق */
-  async markAsRead(notificationId: string, userId?: string): Promise<Notification> {
+  /** يدعم تمرير userId اختياريًا للتحقق من الملكية دون كسر التوافق — مع فرض tenantId */
+  async markAsRead(notificationId: string, tenantId: string, userId?: string): Promise<Notification> {
     const notification = await this.notificationsRepo.findOne({
       where: { id: notificationId },
       relations: ['user'],
     });
     if (!notification) throw new NotFoundException(`التنبيه ${notificationId} غير موجود`);
 
-    if (userId && notification.user?.id && notification.user.id !== userId) {
-      // حماية إضافية اختيارية
+    // تحقق المستأجر
+    if (!notification.user?.id) throw new NotFoundException('صاحب التنبيه غير معروف');
+    await this.mustGetUserInTenant(notification.user.id, tenantId);
+
+    if (userId && notification.user.id !== userId) {
       throw new ForbiddenException('لا تملك صلاحية تعديل هذا التنبيه');
     }
 
@@ -156,7 +182,12 @@ export class NotificationsService {
     return notification;
   }
 
-  async markAllAsRead(userId: string): Promise<void> {
+  /** وسم جميع تنبيهات المستخدم كمقروءة — مع فرض tenantId */
+  async markAllAsRead(userId: string, tenantId: string): Promise<void> {
+    // تأكيد الانتماء للمستأجر
+    await this.mustGetUserInTenant(userId, tenantId);
+
+    // لا نعتمد على حقل tenantId في جدول التنبيهات (قد لا يوجد)
     await this.notificationsRepo
       .createQueryBuilder()
       .update()
@@ -165,15 +196,17 @@ export class NotificationsService {
       .execute();
   }
 
-  // ========== سيناريوهات منفصلة ==========
+  // ========== سيناريوهات منفصلة (أضفنا tenantId لكل دالة) ==========
+
   /** خصم محفظة عام */
   async walletDebit(
     userId: string,
+    tenantId: string,
     amountUserCurrency: number,
     orderId?: string,
     ctx?: { packageName?: string; userIdentifier?: string }
   ) {
-    const user = await this.mustGetUser(userId);
+    const user = await this.mustGetUserInTenant(userId, tenantId);
     const code = user.currency?.code ?? 'USD';
     const sym = this.symbolFor(code);
     const amountText = `${this.fmt(amountUserCurrency)} ${sym}`;
@@ -183,6 +216,7 @@ export class NotificationsService {
 
     return this.createTyped(
       userId,
+      tenantId,
       'wallet_debit',
       'خصم من المحفظة',
       `تم خصم ${amountText} لإتمام عملية شراء${pkg}${uid}.`,
@@ -192,13 +226,14 @@ export class NotificationsService {
   }
 
   /** شحن محفظة عام */
-  async walletTopup(userId: string, amountUserCurrency: number, reason?: string) {
-    const user = await this.mustGetUser(userId);
+  async walletTopup(userId: string, tenantId: string, amountUserCurrency: number, reason?: string) {
+    const user = await this.mustGetUserInTenant(userId, tenantId);
     const code = user.currency?.code ?? 'USD';
     const sym = this.symbolFor(code);
     const amountText = `${this.fmt(amountUserCurrency)} ${sym}`;
     return this.createTyped(
       userId,
+      tenantId,
       'wallet_topup',
       'شحن رصيد المحفظة',
       `تم شحن المحفظة بمبلغ ${amountText} وإضافته إلى رصيدك${reason ? ` — ${reason}` : ''}.`,
@@ -210,11 +245,12 @@ export class NotificationsService {
   /** إشعار موافقة إيداع (مخصص للإيداع) */
   async depositApproved(
     userId: string,
+    tenantId: string,
     amountUserCurrency: number,
     methodName?: string,
     meta?: Record<string, any>,
   ) {
-    const user = await this.mustGetUser(userId);
+    const user = await this.mustGetUserInTenant(userId, tenantId);
     const code = user.currency?.code ?? 'USD';
     const sym  = this.symbolFor(code);
     const amountText = `${this.fmt(amountUserCurrency)} ${sym}`;
@@ -222,6 +258,7 @@ export class NotificationsService {
 
     return this.createTyped(
       userId,
+      tenantId,
       'wallet_topup',
       'شحن رصيد المحفظة',
       `تم شحن المحفظة بمبلغ ${amountText} وإضافته إلى رصيدك${reason ? ` — ${reason}` : ''}.`,
@@ -233,15 +270,18 @@ export class NotificationsService {
   /** إشعار رفض إيداع (مخصص للإيداع) */
   async depositRejected(
     userId: string,
+    tenantId: string,
     originalAmount: number,
     originalCurrency: string,
     methodName?: string,
     meta?: Record<string, any>,
   ) {
+    await this.mustGetUserInTenant(userId, tenantId);
     const methodTxt = methodName ? ` عبر ${methodName}` : '';
     const origTxt = `${this.fmt(originalAmount)} ${originalCurrency.toUpperCase()}`;
     return this.createTyped(
       userId,
+      tenantId,
       'announcement',
       'تم رفض طلب الإيداع',
       `تم رفض طلب الإيداع بمبلغ ${origTxt}${methodTxt}.`,
@@ -253,6 +293,7 @@ export class NotificationsService {
   // ========== تنبيه مدمج (غير إلزامي لكن مفيد) ==========
   async orderOutcome(
     userId: string,
+    tenantId: string,
     orderId: string,
     outcome: 'approved' | 'rejected',
     opts?: {
@@ -262,7 +303,7 @@ export class NotificationsService {
       mentionRefund?: boolean;     // افتراضي: false (للرفض فقط)
     },
   ) {
-    const user = await this.mustGetUser(userId);
+    const user = await this.mustGetUserInTenant(userId, tenantId);
     const code = user.currency?.code ?? 'USD';
     const sym = this.symbolFor(code);
     const pkg = opts?.packageName ? `«${opts.packageName}»` : 'المحددة';
@@ -289,6 +330,7 @@ export class NotificationsService {
 
     return this.createTyped(
       userId,
+      tenantId,
       'order_status_changed',
       title,
       message,
@@ -308,6 +350,7 @@ export class NotificationsService {
   // ========== توافق خلفي: تغيير حالة الطلب ==========
   async orderStatusChanged(
     userId: string,
+    tenantId: string,
     orderId: string,
     fromStatus: 'approved' | 'rejected' | 'pending',
     toStatus: 'approved' | 'rejected' | 'pending',
@@ -317,7 +360,7 @@ export class NotificationsService {
       userIdentifier?: string;
     },
   ) {
-    const user = await this.mustGetUser(userId);
+    const user = await this.mustGetUserInTenant(userId, tenantId);
     const code = user.currency?.code ?? 'USD';
     const sym = this.symbolFor(code);
 
@@ -360,6 +403,7 @@ export class NotificationsService {
 
     return this.createTyped(
       userId,
+      tenantId,
       'order_status_changed',
       title,
       message,
@@ -376,27 +420,42 @@ export class NotificationsService {
     );
   }
 
-  // ========== إعلان عام ==========
+  // ========== إعلان عام (على مستوى المستأجر فقط) ==========
   async announceForAll(
+    tenantId: string,
     title: string,
     message: string,
     opts?: { link?: string; channel?: 'in_app' | 'email' | 'sms'; priority?: 'low' | 'normal' | 'high' },
-  ) {
-    const users = await this.usersRepo.find({ where: { role: In(['user', 'admin']) } });
-    const notifs = users.map((u) =>
-      this.notificationsRepo.create({
+  ): Promise<{ count: number }> {
+    const users = await this.usersRepo.find({
+      where: { tenantId, role: In(['user', 'admin']) } as any,
+    });
+
+    const hasTenantIdColumn =
+      !!(this.notificationsRepo?.metadata as any)?.propertiesMap &&
+      'tenantId' in (this.notificationsRepo.metadata.propertiesMap as any);
+
+    // ابنِ مدخلات واضحة بنوع DeepPartial<Notification> حتى يختار create/save الأوفرلود الفردي
+    const inputs: DeepPartial<Notification>[] = users.map((u) => {
+      const base: DeepPartial<Notification> = {
         user: u,
-        type: 'announcement',
+        type: 'announcement' as any,
         title,
         message,
         isRead: false,
         readAt: null,
         link: opts?.link ?? null,
-        channel: opts?.channel ?? 'in_app',
-        priority: opts?.priority ?? 'normal',
-      }),
-    );
-    await this.notificationsRepo.save(notifs);
+        channel: (opts?.channel ?? 'in_app') as any,
+        priority: (opts?.priority ?? 'normal') as any,
+      };
+      return hasTenantIdColumn ? { ...base, tenantId } : base;
+    });
+
+    // create يُرجع Notification[] عند تمرير مصفوفة DeepPartial
+    const notifs = this.notificationsRepo.create(inputs);
+    await this.notificationsRepo.save(notifs); // save(Notification[]) — أوفرلود المصفوفة
+
     return { count: notifs.length };
   }
+
 }

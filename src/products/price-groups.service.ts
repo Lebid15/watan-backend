@@ -10,32 +10,35 @@ export class PriceGroupsService {
     @InjectRepository(PriceGroup)
     private readonly priceGroupRepo: Repository<PriceGroup>,
   ) {}
-  async findAll(): Promise<PriceGroup[]> {
-    const groups = await this.priceGroupRepo.find();
-    return groups;
+
+  async findAll(tenantId: string): Promise<PriceGroup[]> {
+    return this.priceGroupRepo.find({
+      where: { tenantId },
+    });
   }
-  async create(data: Partial<PriceGroup>): Promise<PriceGroup> {
-    const group = this.priceGroupRepo.create(data);
-    const saved = await this.priceGroupRepo.save(group);
-    return saved;
+
+  async create(tenantId: string, data: Partial<PriceGroup>): Promise<PriceGroup> {
+    const group = this.priceGroupRepo.create({ ...data, tenantId });
+    return this.priceGroupRepo.save(group);
   }
-  async update(id: string, data: Partial<PriceGroup>): Promise<PriceGroup | null> {
-    const group = await this.priceGroupRepo.findOne({ where: { id } });
-    if (!group) {
-      return null;
-    }
+
+  async update(tenantId: string, id: string, data: Partial<PriceGroup>): Promise<PriceGroup | null> {
+    const group = await this.priceGroupRepo.findOne({ where: { id, tenantId } });
+    if (!group) return null;
+
     Object.assign(group, data);
-    const saved = await this.priceGroupRepo.save(group);
-    return saved;
+    return this.priceGroupRepo.save(group);
   }
-  async remove(id: string): Promise<boolean> {
-    const result = await this.priceGroupRepo.delete(id);
+
+  async remove(tenantId: string, id: string): Promise<boolean> {
+    const result = await this.priceGroupRepo.delete({ id, tenantId });
     return (result.affected ?? 0) > 0;
   }
-  async getUsersPriceGroups(): Promise<PriceGroup[]> {
-    const groups = await this.priceGroupRepo.find({
-      relations: ['users'], 
+
+  async getUsersPriceGroups(tenantId: string): Promise<PriceGroup[]> {
+    return this.priceGroupRepo.find({
+      where: { tenantId },
+      relations: ['users'],
     });
-    return groups;
   }
 }

@@ -7,11 +7,15 @@ import { UserModule } from '../user/user.module';  // تأكد من هذا ال�
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './jwt.strategy';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { Tenant } from '../tenants/tenant.entity';
 
 @Module({
   imports: [
     UserModule,  // مهم جداً: إضافة UserModule هنا ليتمكن AuthService من استخدام UserService
     PassportModule,
+  // ✅ نضيف مستودع Tenant هنا حتى نسمح لـ AuthController بالبحث بالـ tenantCode
+  TypeOrmModule.forFeature([Tenant]),
     JwtModule.register({
       secret: jwtConstants.secret,
       signOptions: { expiresIn: '1d' },

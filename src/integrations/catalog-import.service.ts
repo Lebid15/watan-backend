@@ -1,13 +1,14 @@
+// backend/src/integrations/catalog-import.service.ts
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DeepPartial } from 'typeorm';
 import { CatalogProduct } from '../catalog/catalog-product.entity';
 import { CatalogPackage } from '../catalog/catalog-package.entity';
 import { Integration } from './integration.entity';
 import { HttpService } from '@nestjs/axios';
 import { randomUUID } from 'crypto';
 
-// واجهة عامة لسائق المزود: نحتاج دالة fetchCatalog فقط
+// واجهة عامة لسائق المزود
 type ExternalCatalogItem = {
   productExternalId: string;
   productName: string;
@@ -19,10 +20,11 @@ type ExternalCatalogItem = {
 };
 
 interface ProviderDriverLike {
-  fetchCatalog?: () => Promise<ExternalCatalogItem[]>;
+  fetchCatalog?: (cfg?: any) => Promise<ExternalCatalogItem[]>;
+  listProducts?: (cfg?: any) => Promise<any[]>;
 }
 
-// إن احتجنا سواقات فعلية:
+// سواقات فعلية
 import { ZnetProvider } from './providers/znet.provider';
 import { BarakatProvider } from './providers/barakat.provider';
 
@@ -33,16 +35,16 @@ export class CatalogImportService {
   constructor(
     @InjectRepository(CatalogProduct) private readonly catalogProducts: Repository<CatalogProduct>,
     @InjectRepository(CatalogPackage) private readonly catalogPackages: Repository<CatalogPackage>,
-    @InjectRepository(Integration) private readonly integrationsRepo: Repository<Integration>,
+    @InjectRepository(Integration)    private readonly integrationsRepo: Repository<Integration>,
     private readonly http: HttpService,
   ) {}
 
   /**
-   * upsert لكتالوج مزوّد خارجي إلى جداول الكتالوج
+   * upsert لكتالوج مزوّد خارجي إلى جداول الكتالوج — مع فرض tenantId
    */
-  async importProvider(providerId: string) {
-    const provider = await this.resolveProvider(providerId);
-    const external = await this.fetchExternalCatalog(providerId);
+  async importProvider(tenantId: string | null, providerId: string) {
+    const provider = await this.resolveProvider(providerId, tenantId);
+    const external = await this.fetchExternalCatalog(providerId, tenantId);
 
     if (!external?.length) {
       return { createdProducts: 0, updatedProducts: 0, createdPackages: 0, updatedPackages: 0, total: 0 };
@@ -61,18 +63,24 @@ export class CatalogImportService {
     let createdPackages = 0;
     let updatedPackages = 0;
 
-    // الموجود مسبقًا لنفس المزود
+    // الموجود مسبقًا لنفس المزود ونفس المستأجر
     const existingProducts = await this.catalogProducts.find({
-      where: { sourceProviderId: provider.id },
+      where: { tenantId, sourceProviderId: provider.id } as any,
     });
-    const productsByExt = new Map(existingProducts.map(p => [p.externalProductId ?? '', p]));
+    const productsByExt = new Map<string, CatalogProduct>(
+      existingProducts.map((p) => [p.externalProductId ?? '', p]),
+    );
 
+    // ===== المنتجات =====
     for (const [productExternalId, rows] of byProductExtId.entries()) {
       const first = rows[0];
 
-      let product = productsByExt.get(productExternalId ?? '');
-      if (!product) {
-        product = this.catalogProducts.create({
+      let product: CatalogProduct;
+      const existing = productsByExt.get(productExternalId ?? '');
+
+      if (!existing) {
+        const newProductInput: DeepPartial<CatalogProduct> = {
+          tenantId: tenantId || undefined,
           name: first.productName,
           description: null,
           imageUrl: first.productImageUrl ?? null,
@@ -80,32 +88,40 @@ export class CatalogImportService {
           sourceProviderId: provider.id,
           externalProductId: productExternalId,
           isActive: true,
-        });
-        await this.catalogProducts.save(product);
+        };
+        const newProductEntity = this.catalogProducts.create(newProductInput);
+        product = await this.catalogProducts.save<CatalogProduct>(newProductEntity);
         productsByExt.set(productExternalId ?? '', product);
         createdProducts++;
       } else {
+        product = existing;
         const shouldUpdate =
-          (product.name !== first.productName) ||
+          product.name !== first.productName ||
           (product.imageUrl ?? null) !== (first.productImageUrl ?? null);
+
         if (shouldUpdate) {
           product.name = first.productName;
           product.imageUrl = first.productImageUrl ?? null;
-          await this.catalogProducts.save(product);
+          product = await this.catalogProducts.save<CatalogProduct>(product);
           updatedProducts++;
         }
       }
 
-      // الحزم الخاصة بهذا المنتج
+      // ===== الحزم الخاصة بهذا المنتج =====
       const existingPackages = await this.catalogPackages.find({
-        where: { catalogProductId: product.id, sourceProviderId: provider.id },
+        where: { tenantId, catalogProductId: product.id, sourceProviderId: provider.id } as any,
       });
-      const pkgByExt = new Map(existingPackages.map(x => [x.externalPackageId ?? '', x]));
+      const pkgByExt = new Map<string, CatalogPackage>(
+        existingPackages.map((x) => [x.externalPackageId ?? '', x]),
+      );
 
       for (const r of rows) {
-        let pkg = pkgByExt.get(r.packageExternalId ?? '');
-        if (!pkg) {
-          pkg = this.catalogPackages.create({
+        let pkg: CatalogPackage;
+        const existingPkg = pkgByExt.get(r.packageExternalId ?? '');
+
+        if (!existingPkg) {
+          const newPkgInput: DeepPartial<CatalogPackage> = {
+            tenantId: tenantId || undefined,
             catalogProductId: product.id,
             name: r.packageName,
             publicCode: this.buildPublicCode(),
@@ -114,19 +130,22 @@ export class CatalogImportService {
             costPrice: r.costPrice != null ? String(r.costPrice) : null,
             currencyCode: r.currencyCode ?? null,
             isActive: true,
-          });
-          await this.catalogPackages.save(pkg);
+          };
+          const newPkgEntity = this.catalogPackages.create(newPkgInput);
+          pkg = await this.catalogPackages.save<CatalogPackage>(newPkgEntity);
           createdPackages++;
         } else {
+          pkg = existingPkg;
           const shouldUpdate =
-            (pkg.name !== r.packageName) ||
+            pkg.name !== r.packageName ||
             (pkg.costPrice ?? null) !== (r.costPrice != null ? String(r.costPrice) : null) ||
             (pkg.currencyCode ?? null) !== (r.currencyCode ?? null);
+
           if (shouldUpdate) {
             pkg.name = r.packageName;
             pkg.costPrice = r.costPrice != null ? String(r.costPrice) : null;
             pkg.currencyCode = r.currencyCode ?? null;
-            await this.catalogPackages.save(pkg);
+            pkg = await this.catalogPackages.save<CatalogPackage>(pkg);
             updatedPackages++;
           }
         }
@@ -146,23 +165,30 @@ export class CatalogImportService {
     return randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase();
   }
 
-  /** يجلب تعريف المزوّد من قاعدة البيانات مباشرة */
-  private async resolveProvider(providerId: string) {
-    const provider = await this.integrationsRepo.findOne({ where: { id: providerId } });
+  /** يجلب تعريف المزوّد من قاعدة البيانات مباشرة — مع فرض tenantId */
+  private async resolveProvider(providerId: string, tenantId: string | null) {
+    const where: any = { id: providerId };
+    if (tenantId !== null) {
+      where.tenantId = tenantId;
+    }
+    
+    const provider = await this.integrationsRepo.findOne({
+      where,
+    });
     if (!provider) throw new NotFoundException('Provider not found');
     return provider;
   }
 
-  /** يصنع سائق المزوّد محليًا إن لم توجد خدمة موحّدة */
-  private async getDriver(providerId: string): Promise<ProviderDriverLike> {
-    const provider = await this.resolveProvider(providerId);
+  /** يصنع سائق المزوّد محليًا إن لم توجد خدمة موحّدة — مع تمرير cfg */
+  private async getDriver(providerId: string, tenantId: string | null): Promise<ProviderDriverLike> {
+    const provider = await this.resolveProvider(providerId, tenantId);
 
     // ✅ اقرأ النوع الصحيح من عمود "provider"
     const type = String(
-      (provider as any).provider // <-- العمود الموجود فعليًا عندك
-      ?? (provider as any).type
-      ?? (provider as any).providerType
-      ?? ''
+      (provider as any).provider ??
+      (provider as any).type ??
+      (provider as any).providerType ??
+      ''
     ).toLowerCase();
 
     // ✅ جهّز الإعدادات التي قد يحتاجها السائق
@@ -173,32 +199,32 @@ export class CatalogImportService {
       apiToken: (provider as any).apiToken,
       kod: (provider as any).kod,
       sifre: (provider as any).sifre,
+      tenantId,
     };
 
-    let drv: any;
+    let drv: ProviderDriverLike;
 
     if (type.includes('znet')) {
-      // السائق يقبل HttpService فقط في الـ constructor
-      drv = new ZnetProvider(this.http);
+      drv = new ZnetProvider(this.http) as unknown as ProviderDriverLike;
     } else if (type.includes('barakat') || type.includes('brkt') || type === 'barakat') {
-      drv = new BarakatProvider(this.http);
+      drv = new BarakatProvider(this.http) as unknown as ProviderDriverLike;
     } else {
       throw new BadRequestException(`Unknown provider type for catalog fetch: "${type}"`);
     }
 
-    // مرّر الإعدادات إن كان السائق يدعم configure()، وإلا ضعها على خاصية config
-    if (drv && typeof drv.configure === 'function') {
-      try { await drv.configure(cfg); } catch { /* تجاهل إن لم تكن async */ }
+    // مرّر الإعدادات إن كان السائق يدعم configure()
+    if ((drv as any) && typeof (drv as any).configure === 'function') {
+      try { await (drv as any).configure(cfg); } catch { /* تجاهل إن لم تكن async */ }
     } else {
-      try { drv.config = cfg; } catch { /* لا شيء */ }
+      try { (drv as any).config = cfg; } catch { /* لا شيء */ }
     }
 
-    return drv as ProviderDriverLike;
+    return drv;
   }
 
-  /** يحضر الكتالوج الخارجي ويمرّر cfg إلى السائق */
-  private async fetchExternalCatalog(providerId: string): Promise<ExternalCatalogItem[]> {
-    const provider = await this.resolveProvider(providerId);
+  /** يحضر الكتالوج الخارجي ويمرّر cfg إلى السائق — مع فرض tenantId */
+  private async fetchExternalCatalog(providerId: string, tenantId: string | null): Promise<ExternalCatalogItem[]> {
+    const provider = await this.resolveProvider(providerId, tenantId);
 
     const cfg = {
       id: (provider as any).id,
@@ -207,15 +233,16 @@ export class CatalogImportService {
       apiToken: (provider as any).apiToken,
       kod: (provider as any).kod,
       sifre: (provider as any).sifre,
+      tenantId,
     };
 
-    const driver: any = await this.getDriver(providerId);
+    const driver = await this.getDriver(providerId, tenantId);
 
     try {
       // 1) الأفضل: fetchCatalog(cfg) إن وُجدت
       if (driver && typeof driver.fetchCatalog === 'function') {
         const rows = await driver.fetchCatalog(cfg);
-        return rows.map((r: any) => ({
+        return rows.map((r) => ({
           productExternalId: String(r.productExternalId),
           productName: String(r.productName),
           productImageUrl: r.productImageUrl ?? null,
@@ -237,7 +264,7 @@ export class CatalogImportService {
             (p.category && String(p.category)) ||
             String(p.externalId);
 
-          const productName =
+        const productName =
             (p.category && String(p.category)) ||
             String(p.name);
 
@@ -249,16 +276,15 @@ export class CatalogImportService {
             packageName: String(p.name),
             costPrice: p.basePrice ?? null,
             currencyCode: p.currencyCode ?? 'TRY',
-          };
+          } as ExternalCatalogItem;
         });
       }
 
       throw new BadRequestException('Provider driver does not expose fetchCatalog/listProducts.');
     } catch (e: any) {
       throw new BadRequestException(
-        `Catalog import failed for provider "${(provider as any).name}": ${e?.message ?? e}`
+        `Catalog import failed for provider "${(provider as any).name}": ${e?.message ?? e}`,
       );
     }
   }
-
 }

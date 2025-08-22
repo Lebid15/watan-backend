@@ -1,9 +1,14 @@
-import { Entity, PrimaryGeneratedColumn, Column } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, Index } from 'typeorm';
 
 @Entity('package_mappings')
 export class PackageMapping {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // 🔑 ربط بالـ Tenant
+  @Column('uuid')
+  @Index()
+  tenantId: string;
 
   @Column()
   our_package_id: string; // ID الباقة عندنا
@@ -19,5 +24,4 @@ export class PackageMapping {
     oyun?: string;
     kupur?: string;
   };
-
 }

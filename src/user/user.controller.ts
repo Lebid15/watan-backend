@@ -1,7 +1,8 @@
+// src/user/user.controller.ts
 import {
   Controller, Post, Put, Get, Delete, Patch,
   Body, ConflictException, BadRequestException,
-  UseGuards, Param, ParseUUIDPipe, NotFoundException, Request, Req
+  UseGuards, Param, ParseUUIDPipe, NotFoundException, Request, Req, Query,
 } from '@nestjs/common';
 import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -12,24 +13,34 @@ import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuthGuard } from '@nestjs/passport';
 import { AdminSetPasswordDto } from './dto/admin-set-password.dto';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiParam } from '@nestjs/swagger';
+
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, IsNull } from 'typeorm';
+import { User } from './user.entity';
 
 @ApiTags('Users')
 @Controller('users')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class UserController {
-  constructor(private readonly userService: UserService) {}
+  constructor(
+    private readonly userService: UserService,
+    @InjectRepository(User) private readonly usersRepo: Repository<User>,
+  ) {}
 
   @Post('register')
   @ApiOperation({ summary: 'Register a new user' })
-  async register(@Body() createUserDto: CreateUserDto) {
+  async register(@Body() createUserDto: CreateUserDto, @Req() req) {
+    const tenantId = req.tenant?.id;
+    if (!tenantId) throw new BadRequestException('Tenant not found');
+
     if (!createUserDto.email || !createUserDto.password || !createUserDto.currencyId) {
       throw new BadRequestException('Email, password and currencyId are required');
     }
-    const existingUser = await this.userService.findByEmail(createUserDto.email);
+    const existingUser = await this.userService.findByEmail(createUserDto.email, tenantId);
     if (existingUser) throw new ConflictException('Email already in use');
 
-    const user = await this.userService.createUser(createUserDto);
+    const user = await this.userService.createUser(createUserDto, tenantId);
     return {
       id: user.id,
       email: user.email,
@@ -42,30 +53,80 @@ export class UserController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get current user profile' })
   async getProfile(@Request() req) {
-    const user = await this.userService.findById(req.user.id);
+    // خذ tenantId من سياق الطلب أو من الـ JWT (قد يكون null للمالك)
+    const tokenTenant: string | null = req.user?.tenantId ?? null;
+    const tenantId: string | null = req.tenant?.id ?? tokenTenant;
+
+    // إذا كان المستخدم هو مطور، لا يحتاج للملف الشخصي
+    if (req.user.role === 'developer') {
+      // نعيد كائن مبسط حتى لا تكسر الواجهة (بدلاً من رسالة فقط)
+      return {
+        id: req.user.id,
+        email: req.user.email,
+        role: 'developer',
+        tenantId: null,
+        balance: 0,
+        isActive: true,
+        fullName: null,
+        phoneNumber: null,
+        currency: null,
+        priceGroup: null,
+        priceGroupId: null,
+        priceGroupName: null,
+        developer: true,
+      };
+    }
+
+    let user: User | null = null;
+    if (tenantId) {
+      user = await this.userService.findById(req.user.id, tenantId, ['priceGroup', 'currency']);
+    } else {
+      // مالك المنصة: tenantId IS NULL
+      user = await this.usersRepo.findOne({
+        where: { id: req.user.id, tenantId: IsNull() },
+        relations: ['priceGroup', 'currency'],
+      });
+    }
+
     if (!user) throw new NotFoundException('User not found');
 
-    const { password, ...rest } = user;
+    const { password, ...rest } = user as any;
     return {
       ...rest,
+      role: user.role,
       currency: user.currency ? { id: user.currency.id, code: user.currency.code } : null,
       priceGroup: user.priceGroup ? { id: user.priceGroup.id, name: user.priceGroup.name } : null,
     };
   }
 
+
   @Get('with-price-group')
   @Roles(UserRole.ADMIN, UserRole.DEVELOPER)
-  async findAllWithPriceGroup() {
-    return this.userService.findAllWithPriceGroup();
+  async findAllWithPriceGroup(@Req() req) {
+    const tenantId = req.tenant?.id;
+    return this.userService.findAllWithPriceGroup(tenantId);
   }
 
   @Get()
   @Roles(UserRole.ADMIN, UserRole.DEVELOPER)
   @ApiBearerAuth()
-  async findAll(@Req() req) {
-    const where = req.user?.role === 'admin' ? { adminId: req.user.id } : {};
+  async findAll(
+    @Req() req,
+    @Query('assignedToMe') assignedToMe?: string,
+  ) {
+    // allow fallback to token tenantId similar to profile route
+    const tokenTenant: string | null = req.user?.tenantId ?? null;
+    const tenantId: string | null = req.tenant?.id ?? tokenTenant;
+    if (!tenantId) throw new BadRequestException('Tenant not found');
 
-    const users = await this.userService.findAllUsers(where);
+    // Old behavior forcibly filtered admin users by their own adminId causing empty lists
+    // unless users.adminId was set. We now return all tenant users by default and allow
+    // optional filtering with ?assignedToMe=true
+    const where = (req.user?.role === 'admin' && assignedToMe === 'true')
+      ? { adminId: req.user.id }
+      : {};
+
+    const users = await this.userService.findAllUsers(where as any, tenantId);
     return users.map(user => ({
       id: user.id,
       email: user.email,
@@ -84,17 +145,19 @@ export class UserController {
   @UseGuards(AuthGuard('jwt'))
   @Get('profile-with-currency')
   async getProfileWithCurrency(@Req() req) {
+    const tenantId = req.tenant?.id;
     const userId = req.user.id ?? req.user.sub;
     if (!userId) throw new BadRequestException('User ID is missing in token');
-    return this.userService.getProfileWithCurrency(userId);
+    return this.userService.getProfileWithCurrency(userId, tenantId);
   }
 
   @Get(':id')
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
   @ApiParam({ name: 'id', description: 'UUID of the user to retrieve' })
-  async findById(@Param('id', ParseUUIDPipe) id: string) {
-    const user = await this.userService.findById(id);
+  async findById(@Param('id', ParseUUIDPipe) id: string, @Req() req) {
+    const tenantId = req.tenant?.id;
+    const user = await this.userService.findById(id, tenantId);
     if (!user) throw new NotFoundException(`User with id ${id} not found`);
     return {
       id: user.id,
@@ -119,18 +182,21 @@ export class UserController {
   async updateUser(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateUserDto: UpdateUserDto,
+    @Req() req,
   ) {
+    const tenantId = req.tenant?.id;
     if (updateUserDto.balance !== undefined) {
       updateUserDto.balance = Number(updateUserDto.balance);
     }
-    return this.userService.updateUser(id, updateUserDto as any);
+    return this.userService.updateUser(id, updateUserDto as any, tenantId);
   }
 
   @Delete(':id')
   @Roles(UserRole.ADMIN)
   @ApiBearerAuth()
-  async deleteUser(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
-    await this.userService.deleteUser(id);
+  async deleteUser(@Param('id', ParseUUIDPipe) id: string, @Req() req): Promise<void> {
+    const tenantId = req.tenant?.id;
+    await this.userService.deleteUser(id, tenantId);
   }
 
   @Patch(':id/price-group')
@@ -139,8 +205,10 @@ export class UserController {
   async updatePriceGroup(
     @Param('id', ParseUUIDPipe) userId: string,
     @Body('priceGroupId') groupId: string | null,
+    @Req() req,
   ) {
-    return this.userService.updateUserPriceGroup(userId, groupId);
+    const tenantId = req.tenant?.id;
+    return this.userService.updateUserPriceGroup(userId, groupId, tenantId);
   }
 
   // ====== المسارات الجديدة للوحة المشرف ======
@@ -151,8 +219,10 @@ export class UserController {
   async setActive(
     @Param('id', ParseUUIDPipe) id: string,
     @Body('isActive') isActive: boolean,
+    @Req() req,
   ) {
-    return this.userService.setActive(id, !!isActive);
+    const tenantId = req.tenant?.id;
+    return this.userService.setActive(id, !!isActive, tenantId);
   }
 
   @Patch(':id/balance/add')
@@ -161,8 +231,10 @@ export class UserController {
   async addFunds(
     @Param('id', ParseUUIDPipe) id: string,
     @Body('amount') amount: number,
+    @Req() req,
   ) {
-    return this.userService.addFunds(id, Number(amount));
+    const tenantId = req.tenant?.id;
+    return this.userService.addFunds(id, Number(amount), tenantId);
   }
 
   @Patch(':id/overdraft')
@@ -171,8 +243,10 @@ export class UserController {
   async setOverdraft(
     @Param('id', ParseUUIDPipe) id: string,
     @Body('overdraftLimit') overdraftLimit: number,
+    @Req() req,
   ) {
-    return this.userService.setOverdraft(id, Number(overdraftLimit));
+    const tenantId = req.tenant?.id;
+    return this.userService.setOverdraft(id, Number(overdraftLimit), tenantId);
   }
 
   @Patch(':id/password')
@@ -182,11 +256,12 @@ export class UserController {
   async adminSetPassword(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AdminSetPasswordDto,
+    @Req() req,
   ) {
+    const tenantId = req.tenant?.id;
     if (!dto?.password || dto.password.length < 6) {
       throw new BadRequestException('Password too short');
     }
-    return this.userService.adminSetPassword(id, dto.password);
+    return this.userService.adminSetPassword(id, dto.password, tenantId);
   }
-
 }

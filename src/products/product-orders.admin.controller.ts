@@ -13,7 +13,10 @@ import {
   Logger,
   Query,
   Header,
+  Req,
+  ForbiddenException,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 
@@ -72,151 +75,146 @@ export class ProductOrdersAdminController {
     return Number.isFinite(n) ? n : undefined;
   }
 
-/** تفطيح كائن الطلب لشكل يناسب الواجهة (يحترم الحقول الجاهزة من السيرفس) */
-private toClient(o: any) {
-  // 1) لو السيرفس أعاد القيم الجاهزة، استخدمها مباشرة
-  const preSellTRY   = (o as any).sellTRY;
-  const preCostTRY   = (o as any).costTRY;
-  const preProfitTRY = (o as any).profitTRY;
-  const preCurrencyTRY = (o as any).currencyTRY;
+  /** تفطيح كائن الطلب لشكل يناسب الواجهة (يحترم الحقول الجاهزة من السيرفس) */
+  private toClient(o: any) {
+    const preSellTRY = (o as any).sellTRY;
+    const preCostTRY = (o as any).costTRY;
+    const preProfitTRY = (o as any).profitTRY;
+    const preCurrencyTRY = (o as any).currencyTRY;
 
-  // 2) fallback للحساب القديم فقط إن لم تكن القيم جاهزة
-  const num = (v: any): number | undefined => {
-    if (v == null) return undefined;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : undefined;
-  };
+    const num = (v: any): number | undefined => {
+      if (v == null) return undefined;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
 
-  const calcSellTRY =
-    num((o as any).sellTryAtApproval) ??
-    ((o as any).sellPriceCurrency === 'TRY'
-      ? num((o as any).sellPriceAmount ?? (o as any).price)
-      : undefined);
+    const calcSellTRY =
+      num((o as any).sellTryAtApproval) ??
+      ((o as any).sellPriceCurrency === 'TRY'
+        ? num((o as any).sellPriceAmount ?? (o as any).price)
+        : undefined);
 
-  const calcCostTRY =
-    num((o as any).costTryAtApproval) ??
-    ((o as any).costCurrency === 'TRY' ? num((o as any).costAmount) : undefined);
+    const calcCostTRY =
+      num((o as any).costTryAtApproval) ??
+      ((o as any).costCurrency === 'TRY' ? num((o as any).costAmount) : undefined);
 
-  const calcProfitTRY =
-    num((o as any).profitTryAtApproval) ??
-    (calcSellTRY != null && calcCostTRY != null
-      ? Number((calcSellTRY - calcCostTRY).toFixed(2))
-      : undefined);
+    const calcProfitTRY =
+      num((o as any).profitTryAtApproval) ??
+      (calcSellTRY != null && calcCostTRY != null
+        ? Number((calcSellTRY - calcCostTRY).toFixed(2))
+        : undefined);
 
-  const sellTRY   = preSellTRY   != null ? preSellTRY   : calcSellTRY;
-  const costTRY   = preCostTRY   != null ? preCostTRY   : calcCostTRY;
-  const profitTRY = preProfitTRY != null ? preProfitTRY : calcProfitTRY;
+    const sellTRY = preSellTRY != null ? preSellTRY : calcSellTRY;
+    const costTRY = preCostTRY != null ? preCostTRY : calcCostTRY;
+    const profitTRY = preProfitTRY != null ? preProfitTRY : calcProfitTRY;
 
-  const currencyTRY =
-    preCurrencyTRY ??
-    (sellTRY != null || costTRY != null || profitTRY != null ? 'TRY' : undefined);
+    const currencyTRY =
+      preCurrencyTRY ??
+      (sellTRY != null || costTRY != null || profitTRY != null ? 'TRY' : undefined);
 
-  // ملاحظات: لو السيرفس أعاد notesCount جاهزة استخدمها، وإلا احسب من notes[]
-  const notesCountReady =
-    (o as any).notesCount != null
-      ? Number((o as any).notesCount)
-      : Array.isArray((o as any).notes)
-      ? (o as any).notes.length
-      : 0;
+    const notesCountReady =
+      (o as any).notesCount != null
+        ? Number((o as any).notesCount)
+        : Array.isArray((o as any).notes)
+        ? (o as any).notes.length
+        : 0;
 
-  return {
-    id: o.id,
-    orderNo: (o as any).orderNo ?? null,
-    status: o.status,
-    userIdentifier: (o as any).userIdentifier ?? null,
+    return {
+      id: o.id,
+      orderNo: (o as any).orderNo ?? null,
+      status: o.status,
+      userIdentifier: (o as any).userIdentifier ?? null,
 
-    username:
-      ((o as any).user && ((o as any).user.username || (o as any).user.fullName)) ||
-      (o as any).username || undefined,
-    userEmail:
-      ((o as any).user && (o as any).user.email) ||
-      (o as any).userEmail || undefined,
+      username:
+        ((o as any).user && ((o as any).user.username || (o as any).user.fullName)) ||
+        (o as any).username || undefined,
+      userEmail:
+        ((o as any).user && (o as any).user.email) ||
+        (o as any).userEmail || undefined,
 
-    product: (o as any).product
-      ? {
-          id: (o as any).product.id,
-          name: (o as any).product.name,
-          imageUrl:
-            (o as any).product.imageUrl ||
-            (o as any).product.image ||
-            (o as any).product.logoUrl ||
-            (o as any).product.iconUrl ||
-            null,
-        }
-      : undefined,
-    package: (o as any).package
-      ? {
-          id: (o as any).package.id,
-          name: (o as any).package.name,
-          imageUrl:
-            (o as any).package.imageUrl ||
-            (o as any).package.image ||
-            (o as any).package.logoUrl ||
-            (o as any).package.iconUrl ||
-            null,
-          productId:
-            ((o as any).product && (o as any).product.id) ??
-            (o as any).package?.productId ??
-            null,
-        }
-      : undefined,
+      product: (o as any).product
+        ? {
+            id: (o as any).product.id,
+            name: (o as any).product.name,
+            imageUrl:
+              (o as any).product.imageUrl ||
+              (o as any).product.image ||
+              (o as any).product.logoUrl ||
+              (o as any).product.iconUrl ||
+              null,
+          }
+        : undefined,
+      package: (o as any).package
+        ? {
+            id: (o as any).package.id,
+            name: (o as any).package.name,
+            imageUrl:
+              (o as any).package.imageUrl ||
+              (o as any).package.image ||
+              (o as any).package.logoUrl ||
+              (o as any).package.iconUrl ||
+              null,
+            productId:
+              ((o as any).product && (o as any).product.id) ??
+              (o as any).package?.productId ??
+              null,
+          }
+        : undefined,
 
-    providerId: (o as any).providerId ?? null,
-    providerName: (o as any).providerName ?? null,
-    externalOrderId: (o as any).externalOrderId ?? null,
+      providerId: (o as any).providerId ?? null,
+      providerName: (o as any).providerName ?? null,
+      externalOrderId: (o as any).externalOrderId ?? null,
 
-    createdAt: (o as any).createdAt,
-    sentAt: (o as any).sentAt ?? null,
-    completedAt: (o as any).completedAt ?? null,
-    durationMs: (o as any).durationMs ?? null,
+      createdAt: (o as any).createdAt,
+      sentAt: (o as any).sentAt ?? null,
+      completedAt: (o as any).completedAt ?? null,
+      durationMs: (o as any).durationMs ?? null,
 
-    fxLocked: (o as any).fxLocked ?? false,
-    approvedLocalDate: (o as any).approvedLocalDate ?? undefined,
+      fxLocked: (o as any).fxLocked ?? false,
+      approvedLocalDate: (o as any).approvedLocalDate ?? undefined,
 
-    // أسعار البيع/التكلفة الأصلية (إن وُجدت)
-    sellPriceAmount: num((o as any).sellPriceAmount ?? (o as any).price),
-    sellPriceCurrency: (o as any).sellPriceCurrency ?? (o as any).currencyCode ?? 'USD',
-    costAmount: num((o as any).costAmount),
-    costCurrency: (o as any).costCurrency ?? 'USD',
-    price: num((o as any).price),
+      sellPriceAmount: this.num((o as any).sellPriceAmount ?? (o as any).price),
+      sellPriceCurrency: (o as any).sellPriceCurrency ?? (o as any).currencyCode ?? 'USD',
+      costAmount: this.num((o as any).costAmount),
+      costCurrency: (o as any).costCurrency ?? 'USD',
+      price: this.num((o as any).price),
 
-    // قيم TRY النهائية الموثوقة
-    sellTRY,
-    costTRY,
-    profitTRY,
-    currencyTRY,
+      sellTRY,
+      costTRY,
+      profitTRY,
+      currencyTRY,
 
-    // الحقول الجديدة
-    providerMessage:
-      (o as any).providerMessage ??
-      (o as any).lastMessage ??
-      null,
-    pinCode: (o as any).pinCode ?? null,
-    notesCount: notesCountReady,
-    manualNote: (o as any).manualNote ?? null,
-  };
-}
-
+      providerMessage:
+        (o as any).providerMessage ??
+        (o as any).lastMessage ??
+        null,
+      pinCode: (o as any).pinCode ?? null,
+      notesCount: notesCountReady,
+      manualNote: (o as any).manualNote ?? null,
+    };
+  }
 
   @Get()
   @Header('Cache-Control', 'no-store')
-  async list(@Query() query: ListOrdersDto) {
-    const res = await this.productsService.listOrdersForAdmin(query);
+  async list(@Query() query: ListOrdersDto, @Req() req: Request) {
+    const user = req.user as any;
+  // تمرير tenantId كوسيط ثانٍ صريح (الخدمة تتوقعه خارج الـ dto)
+  const res = await this.productsService.listOrdersForAdmin(query, user.tenantId);
+
     if (res && Array.isArray((res as any).items)) {
-      // العناصر أصلاً مُسطّحة من السيرفس — أعدها كما هي
       return res;
     }
-    // وإلا (في حالات قديمة) استخدم toClient
     if (Array.isArray(res)) {
       return (res as any).map((o: ProductOrder) => this.toClient(o));
     }
     return res;
   }
 
-
   @Get('all')
-  async getAllOrders() {
-    const items = await this.productsService.getAllOrders();
+  async getAllOrders(@Req() req: Request) {
+  const user = req.user as any;
+  // تمرير tenantId لتقييد النتائج (كانت سابقاً بدون تمرير فتُعيد جميع التينانتس)
+  const items = await this.productsService.getAllOrders(undefined, user.tenantId);
     return Array.isArray(items) ? items.map((o) => this.toClient(o)) : items;
   }
 
@@ -244,14 +242,20 @@ private toClient(o: any) {
 
   /** 🔹 تحويل الطلبات المحددة إلى Manual */
   @Post('bulk/manual')
-  async setManual(@Body() body: { ids: string[]; note?: string }) {
+  async setManual(@Body() body: { ids: string[]; note?: string }, @Req() req: Request) {
     const { ids, note } = body || {};
     if (!ids?.length) throw new BadRequestException('ids is required');
 
-    const orders = await this.orderRepo.findBy({ id: In(ids) as any });
+    const tenantId = (req as any).user?.tenantId;
+    const orders = await this.orderRepo.createQueryBuilder('o')
+      .innerJoinAndSelect('o.user', 'u')
+      .where('o.id IN (:...ids)', { ids })
+      .andWhere('u.tenantId = :tid', { tid: tenantId })
+      .getMany();
+
     for (const order of orders) {
-      order.providerId = null;
-      order.externalOrderId = null;
+      (order as any).providerId = null;
+      (order as any).externalOrderId = null;
       (order as any).externalStatus = 'not_sent';
       (order as any).sentAt = null;
       (order as any).lastSyncAt = null;
@@ -279,17 +283,19 @@ private toClient(o: any) {
   /** 🔹 إرسال جماعي */
   @Post('bulk/dispatch')
   async bulkDispatch(
-    @Body()
-    body: {
-      ids: string[];
-      providerId?: string;
-      note?: string;
-    },
-  ) {
+    @Body() body: { ids: string[]; providerId?: string; note?: string },
+    @Req() req: Request
+  ){
     const { ids, providerId, note } = body || {};
     if (!ids?.length) throw new BadRequestException('ids is required');
 
-    const orders = await this.orderRepo.findBy({ id: In(ids) as any });
+    const tenantId = (req as any).user?.tenantId;
+    const orders = await this.orderRepo.createQueryBuilder('o')
+      .innerJoinAndSelect('o.user', 'u')
+      .where('o.id IN (:...ids)', { ids })
+      .andWhere('u.tenantId = :tid', { tid: tenantId })
+      .getMany();
+
     this.logger.debug(`bulk/dispatch: got ${orders.length} orders`);
 
     const results: Array<{ id: string; ok: boolean; message?: string }> = [];
@@ -300,7 +306,7 @@ private toClient(o: any) {
           results.push({ id: order.id, ok: false, message: 'already sent' });
           continue;
         }
-        await this.performDispatch(order, providerId, note);
+        await this.performDispatch(order, providerId, note, tenantId); // ← تمرير tenantId
         if (note) await this.productsService.addOrderNote(order.id, 'admin', `Dispatch: ${note}`);
         results.push({ id: order.id, ok: true });
       } catch (e: any) {
@@ -322,11 +328,17 @@ private toClient(o: any) {
 
   /** 🔹 موافقة جماعية */
   @Post('bulk/approve')
-  async bulkApprove(@Body() body: { ids: string[]; note?: string }) {
+  async bulkApprove(@Body() body: { ids: string[]; note?: string }, @Req() req: Request){
     const { ids, note } = body || {};
     if (!ids?.length) throw new BadRequestException('ids is required');
 
-    const orders = await this.orderRepo.findBy({ id: In(ids) as any });
+    const tenantId = (req as any).user?.tenantId;
+    const orders = await this.orderRepo.createQueryBuilder('o')
+      .innerJoinAndSelect('o.user', 'u')
+      .where('o.id IN (:...ids)', { ids })
+      .andWhere('u.tenantId = :tid', { tid: tenantId })
+      .getMany();
+
     let ok = 0, fail = 0;
 
     for (const order of orders) {
@@ -348,7 +360,11 @@ private toClient(o: any) {
         );
         ok++;
       } catch (e: any) {
-        await this.productsService.addOrderNote(order.id, 'system', `Approve failed: ${String(e?.message || 'fail')}`);
+        await this.productsService.addOrderNote(
+          order.id,
+          'system',
+          `Approve failed: ${String(e?.message || 'fail')}`,
+        );
         fail++;
       }
     }
@@ -357,11 +373,17 @@ private toClient(o: any) {
 
   /** 🔹 رفض جماعي */
   @Post('bulk/reject')
-  async bulkReject(@Body() body: { ids: string[]; note?: string }) {
+  async bulkReject(@Body() body: { ids: string[]; note?: string }, @Req() req: Request){
     const { ids, note } = body || {};
     if (!ids?.length) throw new BadRequestException('ids is required');
 
-    const orders = await this.orderRepo.findBy({ id: In(ids) as any });
+    const tenantId = (req as any).user?.tenantId;
+    const orders = await this.orderRepo.createQueryBuilder('o')
+      .innerJoinAndSelect('o.user', 'u')
+      .where('o.id IN (:...ids)', { ids })
+      .andWhere('u.tenantId = :tid', { tid: tenantId })
+      .getMany();
+
     let ok = 0, fail = 0;
 
     for (const order of orders) {
@@ -383,7 +405,11 @@ private toClient(o: any) {
         );
         ok++;
       } catch (e: any) {
-        await this.productsService.addOrderNote(order.id, 'system', `Reject failed: ${String(e?.message || 'fail')}`);
+        await this.productsService.addOrderNote(
+          order.id,
+          'system',
+          `Reject failed: ${String(e?.message || 'fail')}`,
+        );
         fail++;
       }
     }
@@ -395,15 +421,20 @@ private toClient(o: any) {
   async dispatchOrder(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() body: { providerId?: string; note?: string },
+    @Req() req: Request
   ) {
-    const order = await this.orderRepo.findOne({ where: { id } });
+    const tenantId = (req as any).user?.tenantId;
+    const order = await this.orderRepo.findOne({ where: { id }, relations: ['user'] });
     if (!order) throw new NotFoundException('الطلب غير موجود');
+    if ((order as any).user?.tenantId !== tenantId) {
+      throw new ForbiddenException('لا تملك صلاحية على هذا الطلب');
+    }
 
     if ((order as any).externalOrderId) {
       throw new BadRequestException('الطلب تم إرساله مسبقًا');
     }
 
-    const result = await this.performDispatch(order, body.providerId, body.note);
+    const result = await this.performDispatch(order, body.providerId, body.note, tenantId); // ← تمرير tenantId
     if (body?.note) await this.productsService.addOrderNote(order.id, 'admin', `Dispatch: ${body.note}`);
     return { message: 'تم إرسال الطلب للموفّر', order: result };
   }
@@ -411,7 +442,6 @@ private toClient(o: any) {
   /** 🔹 تحديث حالة الطلب من المزوّد (قديم) */
   @Post(':id/refresh')
   async refreshOrder(@Param('id', new ParseUUIDPipe()) id: string) {
-    // مُبقاة للتوافق؛ يُفضل استخدام sync-external
     return this.syncExternal(id);
   }
 
@@ -427,14 +457,19 @@ private toClient(o: any) {
   async updateOrderStatus(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() body: { status: OrderStatus; note?: string },
+    @Req() req: Request
   ) {
     const { status, note } = body;
     if (!['approved', 'rejected'].includes(status)) {
       throw new NotFoundException('الحالة غير صحيحة');
     }
 
-    const order = await this.orderRepo.findOne({ where: { id } });
+    const tenantId = (req as any).user?.tenantId;
+    const order = await this.orderRepo.findOne({ where: { id }, relations: ['user'] });
     if (!order) throw new NotFoundException('الطلب غير موجود');
+    if ((order as any).user?.tenantId !== tenantId) {
+      throw new ForbiddenException('لا تملك صلاحية على هذا الطلب');
+    }
 
     if (note) {
       (order as any).manualNote = note.slice(0, 500);
@@ -510,8 +545,8 @@ private toClient(o: any) {
     orderInput: ProductOrder,
     providerId?: string | null,
     note?: string,
+    tenantId?: string, // ← أضفنا tenantId هنا
   ) {
-    // ... (نفس منطقك الحالي دون تغيير)
     const order =
       (orderInput as any)?.package && (orderInput as any)?.user
         ? orderInput
@@ -523,6 +558,9 @@ private toClient(o: any) {
     if (!order) throw new NotFoundException('الطلب غير موجود (relations)');
     if (!(order as any).package) throw new BadRequestException('لا توجد باقة مرتبطة بالطلب');
     if (!(order as any).user) throw new BadRequestException('لا يوجد مستخدم مرتبط بالطلب');
+
+    // ✅ نحسب effectiveTenantId لاستدعاءات integrations
+    const effectiveTenantId = String(tenantId ?? (order as any)?.user?.tenantId ?? '');
 
     let chosenProviderId = providerId ?? null;
     if (!chosenProviderId) {
@@ -565,7 +603,8 @@ private toClient(o: any) {
     let oyun: string | undefined;
     let kupur: string | undefined;
 
-    const providerProducts = await this.integrations.syncProducts(chosenProviderId!);
+    // ↙️ تمرير tenantId الإلزامي الآن
+    const providerProducts = await this.integrations.syncProducts(chosenProviderId!, effectiveTenantId);
     const matched = providerProducts.find(
       (p: any) => String(p.externalId) === String((mapping as any).provider_package_id),
     );
@@ -591,7 +630,12 @@ private toClient(o: any) {
       `dispatch -> provider=${chosenProviderId} pkgMap=${(mapping as any).provider_package_id} oyun=${oyun} kupur=${kupur} user=${(order as any).userIdentifier}`,
     );
 
-    const res = await this.integrations.placeOrder(chosenProviderId!, payload);
+    // ↙️ placeOrder الآن يتطلب tenantId أيضًا
+    const res = await this.integrations.placeOrder(
+      chosenProviderId!,
+      effectiveTenantId,
+      payload,
+    );
 
     const externalOrderId = (res as any)?.externalOrderId ?? null;
     const statusRaw: string =

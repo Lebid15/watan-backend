@@ -28,12 +28,18 @@ export type OrderNote = {
 };
 
 @Entity('product_orders')
+@Index('uq_orders_tenant_order_no', ['tenantId', 'orderNo'], { unique: true }) // ✅ رقم الطلب فريد داخل كل Tenant
 export class ProductOrder {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  /** ✅ معرّف المستأجر (Tenant) */
+  @Column({ type: 'uuid' })
+  @Index('idx_orders_tenant')
+  tenantId: string;
+
   /** رقم طلب متسلسل (غير أساسي) */
-  @Index('idx_orders_order_no', { unique: true })
+  @Index('idx_orders_order_no') // ⛔️ لم يعد فريدًا عالميًا — الفريد المركّب بالأعلى
   @Column({ type: 'int', nullable: true })
   @Generated('increment')
   orderNo: number | null;
@@ -162,9 +168,10 @@ export class ProductOrder {
   fxLocked: boolean;
 
   @CreateDateColumn()
+  @Index('idx_orders_created_at')
   createdAt: Date;
 
-   /** ✅ رسالة/ملاحظة من المزوّد */
+  /** ✅ رسالة/ملاحظة من المزوّد */
   @Column({ type: 'text', nullable: true })
   providerMessage?: string | null;
 

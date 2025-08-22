@@ -1,3 +1,4 @@
+// src/products/price-groups.controller.ts
 import {
   Controller,
   Get,
@@ -17,13 +18,14 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
-import type { Express } from 'express';
+import type { Express, Request } from 'express';
 import { ProductsService } from './products.service';
 import { Product } from './product.entity';
 import { ProductPackage } from './product-package.entity';
 import { PriceGroup } from './price-group.entity';
 import { AuthGuard } from '@nestjs/passport';
 import { configureCloudinary } from '../utils/cloudinary';
+
 
 function parseMoney(input?: any): number {
   if (input == null) return 0;
@@ -45,32 +47,39 @@ export class ProductsController {
   // 🔹 مجموعات الأسعار
   // =====================================
   @Get('price-groups')
-  async getPriceGroups(): Promise<PriceGroup[]> {
-    return this.productsService.getPriceGroups();
+  async getPriceGroups(@Req() req: Request): Promise<PriceGroup[]> {
+    // ✅ استخدم tenant context من middleware
+    return this.productsService.getPriceGroups((req as any).tenant?.id || (req as any).user?.tenantId);
   }
 
   @Post('price-groups')
-  async createPriceGroup(@Body() body: Partial<PriceGroup>): Promise<PriceGroup> {
-    return this.productsService.createPriceGroup(body);
+  async createPriceGroup(@Req() req: Request, @Body() body: Partial<PriceGroup>): Promise<PriceGroup> {
+    // ✅ استخدم tenant context من middleware
+    return this.productsService.createPriceGroup((req as any).tenant?.id || (req as any).user?.tenantId, body);
   }
 
   @Delete('price-groups/:id')
-  async deletePriceGroup(@Param('id') id: string) {
-    await this.productsService.deletePriceGroup(id);
+  async deletePriceGroup(@Req() req: Request, @Param('id') id: string) {
+    // ✅ استخدم tenant context من middleware
+    await this.productsService.deletePriceGroup((req as any).tenant?.id || (req as any).user?.tenantId, id);
     return { message: 'تم حذف المجموعة بنجاح' };
   }
 
   @Get('users-price-groups')
-  async getUsersPriceGroups() {
-    return this.productsService.getUsersPriceGroups();
+  async getUsersPriceGroups(@Req() req: Request) {
+    // ✅ استخدم tenant context من middleware
+    return this.productsService.getUsersPriceGroups((req as any).tenant?.id || (req as any).user?.tenantId);
   }
 
   // =====================================
   // 🔹 المنتجات
   // =====================================
   @Get()
-  async findAll(): Promise<any[]> {
-    const products = await this.productsService.findAllWithPackages();
+  async findAll(@Req() req: Request): Promise<any[]> {
+    // ✅ استخدم tenant context من middleware
+    const tenantId = (req as any).tenant?.id || (req as any).user?.tenantId;
+    console.log('[PRODUCTS] findAll tenantId=', tenantId);
+    const products = await this.productsService.findAllWithPackages(tenantId);
     return products.map((product) => ({
       ...product,
       packagesCount: product.packages?.length ?? 0,
@@ -78,31 +87,45 @@ export class ProductsController {
   }
 
   @Get(':id')
-  async findOne(@Param('id') id: string): Promise<any> {
-    const product = await this.productsService.findOneWithPackages(id);
+  async findOne(@Req() req: Request, @Param('id') id: string): Promise<any> {
+    // ✅ استخدم tenant context من middleware
+    const tenantId = (req as any).tenant?.id || (req as any).user?.tenantId;
+    console.log('[PRODUCTS] findOne tenantId=', tenantId, 'productId=', id);
+    const product = await this.productsService.findOneWithPackages(tenantId, id);
     if (!product) throw new NotFoundException('معرف المنتج غير صالح');
     return product;
   }
 
   @Post()
-  async create(@Body() body: Partial<Product>): Promise<Product> {
+  async create(@Req() req: Request, @Body() body: Partial<Product>): Promise<Product> {
+    // ✅ استخدم tenant context من middleware
+    const tenantId = (req as any).tenant?.id || (req as any).user?.tenantId;
+    console.log('[PRODUCTS] create tenantId=', tenantId);
     const product = new Product();
     product.name = body.name ?? 'منتج بدون اسم';
     product.description = body.description ?? '';
     product.isActive = body.isActive ?? true;
+    product.tenantId = tenantId;
     return this.productsService.create(product);
   }
 
   @Put(':id')
-  async update(@Param('id') id: string, @Body() body: Partial<Product>): Promise<Product> {
-    return this.productsService.update(id, body);
+  async update(@Req() req: Request, @Param('id') id: string, @Body() body: Partial<Product>): Promise<Product> {
+    // ✅ استخدم tenant context من middleware
+    const tenantId = (req as any).tenant?.id || (req as any).user?.tenantId;
+    console.log('[PRODUCTS] update tenantId=', tenantId, 'productId=', id);
+    return this.productsService.update(tenantId, id, body);
   }
 
   @Delete(':id')
-  async delete(@Param('id') id: string): Promise<{ message: string }> {
-    await this.productsService.delete(id);
+  async delete(@Req() req: Request, @Param('id') id: string): Promise<{ message: string }> {
+    // ✅ استخدم tenant context من middleware
+    const tenantId = (req as any).tenant?.id || (req as any).user?.tenantId;
+    console.log('[PRODUCTS] delete tenantId=', tenantId, 'productId=', id);
+    await this.productsService.delete(tenantId, id);
     return { message: 'تم حذف المنتج بنجاح' };
   }
+
   // 🔹 رفع صورة المنتج إلى Cloudinary
   // =====================================
   @Post(':id/image')
@@ -117,7 +140,7 @@ export class ProductsController {
       },
     }),
   )
-  async uploadProductImage(@Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+  async uploadProductImage(@Req() req: Request, @Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
     if (!file) throw new NotFoundException('لم يتم تقديم ملف (image)');
 
     try {
@@ -133,7 +156,7 @@ export class ProductsController {
       if (!result?.secure_url) {
         throw new Error('Cloudinary did not return secure_url');
       }
-      return this.productsService.updateImage(id, result.secure_url);
+      return this.productsService.updateImage((req as any).tenant?.id || (req as any).user?.tenantId, id, result.secure_url);
     } catch (err: any) {
       console.error('[Upload Product Image] Cloudinary error:', {
         message: err?.message,
@@ -160,6 +183,7 @@ export class ProductsController {
     }),
   )
   async addPackage(
+    @Req() req: Request,
     @Param('id') productId: string,
     @UploadedFile() file: Express.Multer.File,
     @Body('name') name: string,
@@ -193,7 +217,7 @@ export class ProductsController {
 
     const capital = parseMoney(capitalStr ?? basePriceStr ?? priceStr);
 
-    return this.productsService.addPackageToProduct(productId, {
+    return this.productsService.addPackageToProduct((req as any).tenant?.id || (req as any).user?.tenantId, productId, {
       name,
       imageUrl,
       capital,
@@ -201,18 +225,22 @@ export class ProductsController {
   }
 
   @Delete('packages/:id')
-  async deletePackage(@Param('id') id: string): Promise<{ message: string }> {
-    await this.productsService.deletePackage(id);
+  async deletePackage(@Req() req: Request, @Param('id') id: string): Promise<{ message: string }> {
+    // ✅ استخدم tenant context من middleware
+    await this.productsService.deletePackage((req as any).tenant?.id || (req as any).user?.tenantId, id);
     return { message: 'تم حذف الباقة بنجاح' };
   }
 
   @Put('packages/:id/prices')
   async updatePackagePrices(
+    @Req() req: Request,
     @Param('id') packageId: string,
     @Body() body: { capital: number; prices: { groupId: string; price: number }[] },
   ) {
-    await this.productsService.updatePackagePrices(packageId, body);
-    const rows = await this.productsService.getPackagesPricesBulk({ packageIds: [packageId] });
+    // ✅ استخدم tenant context من middleware
+    const tenantId = (req as any).tenant?.id || (req as any).user?.tenantId;
+    await this.productsService.updatePackagePrices(tenantId, packageId, body);
+    const rows = await this.productsService.getPackagesPricesBulk(tenantId, { packageIds: [packageId] });
     return {
       packageId,
       capital: body.capital,
@@ -228,16 +256,17 @@ export class ProductsController {
   // =====================================
   // 🔹 جلب أسعار باقات متعددة (Bulk)
   // =====================================
-
-  // ✅ المسار المعتمد لتفادي طول الرابط
   @Post('packages/prices')
-  async getPackagesPricesBulk(@Body() body: { packageIds: string[]; groupId?: string }, @Req() _req: any) {
-    return this.productsService.getPackagesPricesBulk(body);
+  async getPackagesPricesBulk(
+    @Req() req: Request,
+    @Body() body: { packageIds: string[]; groupId?: string },
+  ) {
+    return this.productsService.getPackagesPricesBulk((req as any).user?.tenantId, body);
   }
 
-  // ⛔ اختياري: استعمله فقط للاستعلامات القصيرة (قد يسبب طول رابط)
   @Get('packages/prices')
   async getPackagesPricesQuery(
+    @Req() req: Request,
     @Query('packageIds') packageIds: string,
     @Query('groupId') groupId?: string,
   ) {
@@ -248,20 +277,27 @@ export class ProductsController {
       .map((s) => s.trim())
       .filter(Boolean)
       .slice(0, 1000);
-    const rows = await this.productsService.getPackagesPricesBulk({ packageIds: ids, groupId });
-    return rows;
+
+    return this.productsService.getPackagesPricesBulk((req as any).tenant?.id || (req as any).user?.tenantId, {
+      packageIds: ids,
+      groupId,
+    });
   }
+
+  // =====================================
   // 🔹 واجهات للمستخدم (JWT)
   // =====================================
   @UseGuards(AuthGuard('jwt'))
   @Get('user')
   async getAllForUser(@Req() req) {
-    return this.productsService.findAllForUser(req.user.id);
+    // ✅ استخدم tenant context من middleware
+    return this.productsService.findAllForUser((req as any).tenant?.id || (req as any).user?.tenantId, req.user.id);
   }
 
   @UseGuards(AuthGuard('jwt'))
   @Get('user/:id')
-  async getOneForUser(@Param('id') id: string, @Req() req) {
-    return this.productsService.findOneForUser(id, req.user.id);
+  async getOneForUser(@Req() req, @Param('id') id: string) {
+    // ✅ استخدم tenant context من middleware
+    return this.productsService.findOneForUser((req as any).tenant?.id || (req as any).user?.tenantId, id, req.user.id);
   }
 }

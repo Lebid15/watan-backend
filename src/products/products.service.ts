@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+// src/products/products.service.ts
+import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Brackets  } from 'typeorm';
+import { Repository, In, Brackets } from 'typeorm';
 import { Product } from './product.entity';
 import { ProductPackage } from './product-package.entity';
 import { PackagePrice } from './package-price.entity';
@@ -19,45 +20,54 @@ import { ListOrdersDto } from './dto/list-orders.dto';
 import { CodeItem } from '../codes/entities/code-item.entity';
 
 
+type OrderView = {
+  id: string;
+  status: string;
+  quantity: number;
+  priceUSD: number;
+  unitPriceUSD: number;
+  display: {
+    currencyCode: string;
+    unitPrice: number;
+    totalPrice: number;
+  };
+  product: { id: string; name: string };
+  package: { id: string; name: string };
+  userIdentifier: string | null;
+  extraField: string | null;
+  createdAt: Date;
+};
+
 export type OrderStatus = 'pending' | 'approved' | 'rejected';
 
 @Injectable()
 export class ProductsService {
   constructor(
-    @InjectRepository(Product)
-    private productsRepo: Repository<Product>,
-
-    @InjectRepository(ProductPackage)
-    private packagesRepo: Repository<ProductPackage>,
-
-    @InjectRepository(PackagePrice)
-    private packagePriceRepo: Repository<PackagePrice>,
-
-    @InjectRepository(PriceGroup)
-    private priceGroupsRepo: Repository<PriceGroup>,
-
-    @InjectRepository(User)
-    private usersRepo: Repository<User>,
-
-    @InjectRepository(ProductOrder)
-    private ordersRepo: Repository<ProductOrder>,
-
-    @InjectRepository(Currency)
-    private currenciesRepo: Repository<Currency>,
-
-    @InjectRepository(OrderDispatchLog)
-    private readonly logsRepo: Repository<OrderDispatchLog>,
-
-    @InjectRepository(PackageRouting)
-    private readonly routingRepo: Repository<PackageRouting>,
-
-    @InjectRepository(PackageMapping)
-    private readonly mappingRepo: Repository<PackageMapping>,
-
+    @InjectRepository(Product)            private productsRepo: Repository<Product>,
+    @InjectRepository(ProductPackage)     private packagesRepo: Repository<ProductPackage>,
+    @InjectRepository(PackagePrice)       private packagePriceRepo: Repository<PackagePrice>,
+    @InjectRepository(PriceGroup)         private priceGroupsRepo: Repository<PriceGroup>,
+    @InjectRepository(User)               private usersRepo: Repository<User>,
+    @InjectRepository(ProductOrder)       private ordersRepo: Repository<ProductOrder>,
+    @InjectRepository(Currency)           private currenciesRepo: Repository<Currency>,
+    @InjectRepository(OrderDispatchLog)   private readonly logsRepo: Repository<OrderDispatchLog>,
+    @InjectRepository(PackageRouting)     private readonly routingRepo: Repository<PackageRouting>,
+    @InjectRepository(PackageMapping)     private readonly mappingRepo: Repository<PackageMapping>,
     private readonly integrations: IntegrationsService,
     private readonly notifications: NotificationsService,
     private readonly accounting: AccountingPeriodsService,
   ) {}
+
+  // ---------- Helpers خاصة بالـ tenant ----------
+  private ensureSameTenant(entityTenantId?: string | null, expectedTenantId?: string) {
+    if (!expectedTenantId) return; // لا تحقق إن لم يُطلب تقييد
+    if (!entityTenantId) throw new ForbiddenException('هذا السجل غير مرتبط بأي مستأجر');
+    if (entityTenantId !== expectedTenantId) throw new ForbiddenException('لا تملك صلاحية على هذا المستأجر');
+  }
+
+  private addTenantWhere(qb: any, alias: string, tenantId?: string) {
+    if (tenantId) qb.andWhere(`${alias}."tenantId" = :tid`, { tid: tenantId });
+  }
 
   // ===== Helper: تطبيع حالة المزود إلى done/failed/processing/sent مع دعم 1/2/3 =====
   private normalizeExternalStatus(raw?: string): 'done' | 'failed' | 'processing' | 'sent' {
@@ -65,37 +75,46 @@ export class ProductsService {
     if (['2', 'success', 'ok', 'done', 'completed', 'complete'].includes(s)) return 'done';
     if (['3', 'failed', 'fail', 'error', 'rejected', 'cancelled', 'canceled'].includes(s)) return 'failed';
     if (['accepted', 'sent', 'queued', 'queue'].includes(s)) return 'sent';
-    return 'processing'; // '1' أو pending/processing
+    return 'processing';
   }
 
-  // ===== ✅ المزامنة اليدوية مع المزود + التقاط note/pin =====
-  async syncExternal(orderId: string): Promise<{
+  // ===== ✅ المزامنة اليدوية مع المزود + التقاط note/pin (مقيّدة بالـ tenant إن مرّ) =====
+  async syncExternal(orderId: string, tenantId?: string): Promise<{
     order: ProductOrder;
     extStatus: 'done' | 'failed' | 'processing' | 'sent';
     note?: string;
     pin?: string;
   }> {
     const order = await this.ordersRepo.findOne({
-      where: { id: orderId },
+      where: { id: orderId } as any,
       relations: ['user', 'package', 'product'],
     });
     if (!order) throw new NotFoundException('الطلب غير موجود');
+    this.ensureSameTenant((order as any).user?.tenantId, tenantId);
 
     if (!order.providerId || !order.externalOrderId) {
       throw new BadRequestException('الطلب غير مرسل خارجيًا');
     }
 
-    // لو منتهٍ لا نمنع، لكن سنُرجع الحالة فورًا
+    // ✅ استنتج tenantId فعّال
+    const effectiveTenantId = String(tenantId ?? (order as any)?.user?.tenantId);
+    // إن أردت التشديد:
+    // if (!effectiveTenantId) throw new BadRequestException('tenantId is required');
+
     const alreadyTerminal =
       order.externalStatus === 'done' ||
       order.externalStatus === 'failed' ||
       order.status === 'approved' ||
       order.status === 'rejected';
 
-    const res = await this.integrations.checkOrders(order.providerId, [order.externalOrderId]);
+    // ✅ مرّر tenantId حسب التوقيع الجديد
+    const res = await this.integrations.checkOrders(
+      order.providerId,
+      effectiveTenantId,
+      [order.externalOrderId],
+    );
     const first: any = Array.isArray(res) ? res[0] : res;
 
-    // استنتاج الحالة
     let statusRaw: string | undefined = first?.mappedStatus;
     if (!statusRaw) {
       const code = String(first?.providerStatus ?? '').trim();
@@ -113,17 +132,15 @@ export class ProductsService {
 
     const extStatus = this.normalizeExternalStatus(statusRaw);
     console.log('[SERVICE syncExternal] provider reply', {
-    orderId: order.id,
-    providerId: order.providerId,
-    externalOrderId: order.externalOrderId,
-    mapped: statusRaw,
-    normalized: extStatus,
-    note: first?.note || first?.raw?.message || first?.raw?.desc || null,
-    pin: first?.pin || first?.raw?.pin || null,
-  });
+      orderId: order.id,
+      providerId: order.providerId,
+      externalOrderId: order.externalOrderId,
+      mapped: statusRaw,
+      normalized: extStatus,
+      note: first?.note || first?.raw?.message || first?.raw?.desc || null,
+      pin: first?.pin || first?.raw?.pin || null,
+    });
 
-
-    // التقاط note/pin
     const note: string | undefined =
       first?.note?.toString?.().trim?.() ||
       first?.raw?.desc?.toString?.().trim?.() ||
@@ -136,24 +153,20 @@ export class ProductsService {
         : first?.raw?.pin != null ? String(first.raw.pin).trim()
         : undefined;
 
-    // تحديث الحقول
-    order.externalStatus = extStatus;
+    order.externalStatus = extStatus as any;
     order.lastSyncAt = new Date();
     order.lastMessage = String(note || first?.raw?.message || first?.raw?.desc || 'sync').slice(0, 250) || null;
     if (pin) order.pinCode = pin;
 
-    // إضافة سجل في notes
     const nowIso = new Date().toISOString();
     if (note && note.trim()) {
       const arr = Array.isArray(order.notes) ? order.notes : [];
       arr.push({ by: 'system', text: note, at: nowIso });
       order.notes = arr as any;
-      (order as any).providerMessage = note;    // ⬅️ لعرض رسالة المزوّد مباشرة
-      (order as any).notesCount = arr.length;   // ⬅️ عدّاد الملاحظات
-
+      (order as any).providerMessage = note;
+      (order as any).notesCount = arr.length;
     }
 
-    // إن كانت نهائية احسب الإتمام
     const isTerminal = extStatus === 'done' || extStatus === 'failed';
 
     if (isTerminal) {
@@ -164,11 +177,11 @@ export class ProductsService {
       await this.ordersRepo.save(order);
 
       if (extStatus === 'done') {
-        await this.updateOrderStatus(order.id, 'approved');
+        await this.updateOrderStatus(order.id, 'approved', effectiveTenantId);
       } else {
-        // extStatus === 'failed'
+        // ✅ قيد routing بالتينانت
         const routing = await this.routingRepo.findOne({
-          where: { package: { id: order.package.id } as any },
+          where: { package: { id: order.package.id } as any, tenantId: effectiveTenantId } as any,
           relations: ['package'],
         });
 
@@ -178,20 +191,13 @@ export class ProductsService {
         const hasFallback = !!routing?.fallbackProviderId;
 
         if (isOnFallback || !hasFallback) {
-          // نحن على المزوّد الثاني أو لا يوجد مزوّد آخر → رفض نهائي
-          await this.updateOrderStatus(order.id, 'rejected');
+          await this.updateOrderStatus(order.id, 'rejected', effectiveTenantId);
         } else {
-          // نحن على المزوّد الأساسي ويوجد بديل
-          // هنا ممكن يا إمّا تترك المونيتور يلتقط الحالة
-          // أو تستدعي tryOnce(routing.fallbackProviderId) الآن
-          // حسب اختيارك
+          // اتركه للمونيتور/إعادة المحاولة لاحقًا
         }
       }
-
     }
 
-
-    // لوج
     await this.logsRepo.save(
       this.logsRepo.create({
         order,
@@ -205,35 +211,30 @@ export class ProductsService {
     return { order, extStatus, note, pin };
   }
 
-  // ========= بقية الملف كما هو (بدون تغيير) =========
 
-  async updateImage(id: string, imageUrl: string): Promise<Product> {
-    const product = await this.productsRepo.findOne({ where: { id } });
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
+  async updateImage(tenantId: string, id: string, imageUrl: string): Promise<Product> {
+    const product = await this.productsRepo.findOne({ where: { id, tenantId } as any });
+    if (!product) throw new NotFoundException('Product not found');
     product.imageUrl = imageUrl;
     return this.productsRepo.save(product);
   }
-  // =====================================
-  // 🔹 المنتجات
-  // =====================================
 
-  async findAllWithPackages(): Promise<any[]> {
+  async findAllWithPackages(tenantId: string): Promise<any[]> {
     const products = await this.productsRepo.find({
+      where: { tenantId } as any,
       relations: ['packages', 'packages.prices', 'packages.prices.priceGroup'],
     });
 
-    const allPriceGroups = await this.priceGroupsRepo.find();
+    const allPriceGroups = await this.priceGroupsRepo.find({ where: { tenantId } as any });
 
     return products.map((product) => ({
       ...product,
-      packages: product.packages.map((pkg) => ({
+      packages: (product.packages || []).map((pkg) => ({
         ...pkg,
         basePrice: pkg.basePrice ?? pkg.capital ?? 0,
         prices: allPriceGroups.map((group) => {
-          const existingPrice = pkg.prices.find(
-            (price) => price.priceGroup.id === group.id,
+          const existingPrice = (pkg.prices || []).find(
+            (price) => price.priceGroup?.id === group.id,
           );
           return {
             id: existingPrice?.id ?? null,
@@ -246,23 +247,23 @@ export class ProductsService {
     }));
   }
 
-  async findOneWithPackages(id: string): Promise<any> {
+  async findOneWithPackages(tenantId: string, id: string): Promise<any> {
     const product = await this.productsRepo.findOne({
-      where: { id },
+      where: { id, tenantId } as any,
       relations: ['packages', 'packages.prices', 'packages.prices.priceGroup'],
     });
     if (!product) throw new NotFoundException('لم يتم العثور على المنتج');
 
-    const allPriceGroups = await this.priceGroupsRepo.find();
+    const allPriceGroups = await this.priceGroupsRepo.find({ where: { tenantId } as any });
 
     return {
       ...product,
-      packages: product.packages.map((pkg) => ({
+      packages: (product.packages || []).map((pkg) => ({
         ...pkg,
         basePrice: pkg.basePrice ?? pkg.capital ?? 0,
         prices: allPriceGroups.map((group) => {
-          const existingPrice = pkg.prices.find(
-            (price) => price.priceGroup.id === group.id,
+          const existingPrice = (pkg.prices || []).find(
+            (price) => price.priceGroup?.id === group.id,
           );
           return {
             id: existingPrice?.id ?? null,
@@ -279,90 +280,72 @@ export class ProductsService {
     return this.productsRepo.save(product);
   }
 
-  async update(id: string, body: Partial<Product>): Promise<Product> {
-    const product = await this.productsRepo.findOne({ where: { id } });
+  async update(tenantId: string, id: string, body: Partial<Product>): Promise<Product> {
+    const product = await this.productsRepo.findOne({ where: { id, tenantId } as any });
     if (!product) throw new NotFoundException('لم يتم العثور على المنتج');
     Object.assign(product, body);
     return this.productsRepo.save(product);
   }
 
-  async delete(id: string): Promise<void> {
-    const product = await this.productsRepo.findOne({ where: { id } });
+  async delete(tenantId: string, id: string): Promise<void> {
+    const product = await this.productsRepo.findOne({ where: { id, tenantId } as any });
     if (!product) throw new NotFoundException('لم يتم العثور على المنتج');
     await this.productsRepo.remove(product);
+  }
+
+  async createPriceGroup(tenantId: string, data: Partial<PriceGroup>): Promise<PriceGroup> {
+    if (!data.name || !data.name.trim()) throw new ConflictException('اسم المجموعة مطلوب');
+    const name = data.name.trim();
+
+    const exists = await this.priceGroupsRepo.findOne({ where: { name, tenantId } as any });
+    if (exists) throw new ConflictException('هذه المجموعة موجودة مسبقًا');
+
+    const created: PriceGroup = this.priceGroupsRepo.create({ ...data, name, tenantId } as Partial<PriceGroup>) as PriceGroup;
+    const saved: PriceGroup = await this.priceGroupsRepo.save(created);
+    return saved;
+  }
+
+  async deletePriceGroup(tenantId: string, id: string): Promise<void> {
+    const row = await this.priceGroupsRepo.findOne({ where: { id, tenantId } as any });
+    if (!row) throw new NotFoundException('لم يتم العثور على المجموعة');
+    await this.priceGroupsRepo.remove(row);
+  }
+
+  async getUsersPriceGroups(tenantId: string): Promise<{ id: string; name: string; usersCount: number }[]> {
+    const groups = await this.priceGroupsRepo.find({ where: { tenantId } as any });
+    return Promise.all(
+      groups.map(async (g) => {
+        const usersCount = await this.usersRepo.count({ where: { tenantId, priceGroup: { id: g.id } } as any });
+        return { id: g.id, name: g.name, usersCount };
+      }),
+    );
   }
 
   // =====================================
   // 🔹 مجموعات الأسعار
   // =====================================
 
-  async getPriceGroups(): Promise<PriceGroup[]> {
-    return this.priceGroupsRepo.find();
+  async getPriceGroups(tenantId: string): Promise<PriceGroup[]> {
+    return this.priceGroupsRepo.find({ where: { tenantId } as any });
   }
-
-  async createPriceGroup(data: Partial<PriceGroup>): Promise<PriceGroup> {
-    if (!data.name || !data.name.trim()) {
-      throw new ConflictException('اسم المجموعة مطلوب');
-    }
-
-    const exists = await this.priceGroupsRepo.findOne({
-      where: { name: data.name.trim() },
-    });
-    if (exists) throw new ConflictException('هذه المجموعة موجودة مسبقًا');
-
-    const group = this.priceGroupsRepo.create({
-      ...data,
-      name: data.name.trim(),
-    });
-    return this.priceGroupsRepo.save(group);
-  }
-
-  async deletePriceGroup(id: string): Promise<void> {
-    const group = await this.priceGroupsRepo.findOne({ where: { id } });
-    if (!group) throw new NotFoundException('لم يتم العثور على المجموعة');
-    await this.priceGroupsRepo.remove(group);
-  }
-
-  async getUsersPriceGroups(): Promise<{ id: string; name: string; usersCount: number }[]> {
-    const groups = await this.priceGroupsRepo.find();
-
-    return Promise.all(
-      groups.map(async (group) => {
-        const usersCount = await this.usersRepo.count({
-          where: { priceGroup: { id: group.id } },
-        });
-        return { id: group.id, name: group.name, usersCount };
-      }),
-    );
-  }
-
-  // =====================================
-  // 🔹 الباقات
-  // =====================================
 
   async addPackageToProduct(
+    tenantId: string,
     productId: string,
     data: Partial<ProductPackage>,
   ): Promise<ProductPackage> {
-    console.log('[SERVICE addPackageToProduct] productId =', productId, 'data =', {
-      name: data?.name,
-      capital: data?.capital ?? data?.basePrice ?? 0,
-      hasImage: !!data?.imageUrl,
-    });
-
-    if (!data.name || !data.name.trim()) {
-      throw new ConflictException('اسم الباقة مطلوب');
-    }
+    if (!data.name || !data.name.trim()) throw new ConflictException('اسم الباقة مطلوب');
 
     const product = await this.productsRepo.findOne({
-      where: { id: productId },
+      where: { id: productId, tenantId } as any,
       relations: ['packages'],
     });
     if (!product) throw new NotFoundException('لم يتم العثور على المنتج');
 
-    const initialCapital = data.capital ?? data.basePrice ?? 0;
+    const initialCapital = Number(data.capital ?? data.basePrice ?? 0);
 
-    const newPackage = this.packagesRepo.create({
+    const newPackage: ProductPackage = this.packagesRepo.create({
+      tenantId,
       name: data.name.trim(),
       description: data.description ?? '',
       basePrice: initialCapital,
@@ -370,110 +353,94 @@ export class ProductsService {
       isActive: data.isActive ?? true,
       imageUrl: data.imageUrl,
       product,
-    });
+    } as Partial<ProductPackage>) as ProductPackage;
 
-    const savedPackage = await this.packagesRepo.save(newPackage);
+    // ✅ ثبّت النوع هنا
+    const saved: ProductPackage = await this.packagesRepo.save(newPackage as ProductPackage);
 
-    const priceGroups = await this.priceGroupsRepo.find();
-    const prices = priceGroups.map((group) =>
-      this.packagePriceRepo.create({
-        package: savedPackage,
-        priceGroup: group,
-        price: initialCapital,
-      }),
-    );
+    // أنشئ مصفوفة الـ rows أولاً ثم create(array) مرة واحدة
+    const priceGroups = await this.priceGroupsRepo.find({ where: { tenantId } as any });
+    const rowsData = priceGroups.map((group) => ({
+      tenantId,
+      package: saved,
+      priceGroup: group,
+      price: initialCapital,
+    })) as Partial<PackagePrice>[];
 
+    const prices: PackagePrice[] = this.packagePriceRepo.create(rowsData) as PackagePrice[];
     await this.packagePriceRepo.save(prices);
-    savedPackage.prices = prices;
 
-    console.log('[SERVICE addPackageToProduct] created package =', {
-      id: savedPackage.id,
-      pricesCount: prices.length,
-    });
-
-    return savedPackage;
+    (saved as any).prices = prices;
+    return saved as ProductPackage;
   }
 
   /** ✅ حذف باقة (مع أسعارها) */
-  async deletePackage(id: string): Promise<void> {
-    const pkg = await this.packagesRepo.findOne({
-      where: { id },
-      relations: ['prices'],
-    });
+  async deletePackage(tenantId: string, id: string): Promise<void> {
+    const pkg = await this.packagesRepo.findOne({ where: { id, tenantId } as any, relations: ['prices'] });
     if (!pkg) throw new NotFoundException('لم يتم العثور على الباقة');
 
-    const pricesCount = Array.isArray(pkg.prices) ? pkg.prices.length : 0;
-    if (pricesCount) {
-      await this.packagePriceRepo.remove(pkg.prices);
-    }
-
+    if (Array.isArray(pkg.prices) && pkg.prices.length) await this.packagePriceRepo.remove(pkg.prices);
     await this.packagesRepo.remove(pkg);
-    console.log('[SERVICE deletePackage] done');
   }
 
   /** ✅ تحديث رأس المال وأسعار الباقة لكل مجموعة */
   async updatePackagePrices(
+    tenantId: string,
     packageId: string,
     data: { capital: number; prices: { groupId: string; price: number }[] },
   ) {
     const pkg = await this.packagesRepo.findOne({
-      where: { id: packageId },
+      where: { id: packageId, tenantId } as any,
       relations: ['prices', 'prices.priceGroup'],
     });
     if (!pkg) throw new NotFoundException('لم يتم العثور على الباقة');
 
-    console.log('[SERVICE updatePackagePrices] current prices =', pkg?.prices?.length ?? 0, 'payload =', {
-      capital: data?.capital,
-      pricesCount: Array.isArray(data?.prices) ? data.prices.length : 0,
-    });
-
-    pkg.capital = data.capital;
-    pkg.basePrice = data.capital;
+    pkg.capital = Number(data.capital || 0);
+    pkg.basePrice = Number(data.capital || 0);
     await this.packagesRepo.save(pkg);
 
     for (const p of data.prices || []) {
-      let priceEntity = (pkg.prices || []).find(
-        (price) => price.priceGroup?.id === p.groupId,
-      );
+      const group = await this.priceGroupsRepo.findOne({ where: { id: p.groupId, tenantId } as any });
+      if (!group) continue;
 
-      const priceGroup = await this.priceGroupsRepo.findOne({ where: { id: p.groupId } });
-      if (!priceGroup) {
-        console.warn('[SERVICE updatePackagePrices] price group not found =>', p.groupId);
-        continue;
-      }
+      let priceEntity = (pkg.prices || []).find((pr) => pr.priceGroup?.id === p.groupId);
 
       if (!priceEntity) {
-        priceEntity = this.packagePriceRepo.create({
+        const createdPrice: PackagePrice = this.packagePriceRepo.create({
+          tenantId,
           package: pkg,
-          priceGroup,
-          price: p.price,
-        });
+          priceGroup: group,
+          price: Number(p.price || 0),
+        } as Partial<PackagePrice>) as PackagePrice;
+        priceEntity = createdPrice;
       } else {
-        priceEntity.price = p.price;
+        priceEntity.price = Number(p.price || 0);
       }
 
-      await this.packagePriceRepo.save(priceEntity);
+      await this.packagePriceRepo.save(priceEntity as PackagePrice);
     }
+
     return { message: 'تم تحديث أسعار الباقة ورأس المال بنجاح' };
   }
 
   /** ✅ جلب أسعار باقات متعددة */
-  async getPackagesPricesBulk(body: { packageIds: string[]; groupId?: string }) {
+  async getPackagesPricesBulk(
+    tenantId: string,
+    body: { packageIds: string[]; groupId?: string },
+  ) {
     if (!Array.isArray(body.packageIds) || body.packageIds.length === 0) {
       throw new BadRequestException('packageIds مطلوب');
     }
-
     const ids = body.packageIds.slice(0, 1000);
 
     const rows = await this.packagePriceRepo.find({
-      where: { package: { id: In(ids) } as any },
+      where: body.groupId
+        ? ({ tenantId, package: { id: In(ids) }, priceGroup: { id: body.groupId } } as any)
+        : ({ tenantId, package: { id: In(ids) } } as any),
       relations: ['package', 'priceGroup'],
     });
 
-    const filtered = body.groupId
-      ? rows.filter((p) => p.priceGroup?.id === body.groupId)
-      : rows;
-    return filtered.map((p) => ({
+    return rows.map((p) => ({
       packageId: p.package.id,
       groupId: p.priceGroup.id,
       groupName: p.priceGroup.name,
@@ -485,19 +452,17 @@ export class ProductsService {
   // ================== التسعير الأساس (بالدولار) ==================
   private async getEffectivePriceUSD(packageId: string, userId: string): Promise<number> {
     const [pkg, user] = await Promise.all([
-      this.packagesRepo.findOne({
-        where: { id: packageId },
-        relations: ['prices', 'prices.priceGroup'],
-      }),
-      this.usersRepo.findOne({
-        where: { id: userId },
-        relations: ['priceGroup'],
-      }),
+      this.packagesRepo.findOne({ where: { id: packageId } as any, relations: ['prices', 'prices.priceGroup'] }),
+      this.usersRepo.findOne({ where: { id: userId } as any, relations: ['priceGroup'] }),
     ]);
 
     if (!pkg) throw new NotFoundException('الباقة غير موجودة');
-    const base = Number(pkg.basePrice ?? pkg.capital ?? 0);
+    if (!user) throw new NotFoundException('المستخدم غير موجود');
 
+    // 🔒 تأكد من تطابق المستأجر بين المستخدم والباقة
+    this.ensureSameTenant((pkg as any).tenantId, (user as any).tenantId);
+
+    const base = Number(pkg.basePrice ?? pkg.capital ?? 0);
     if (!user?.priceGroup) return base;
 
     const match = (pkg.prices ?? []).find(p => p.priceGroup?.id === user.priceGroup!.id);
@@ -510,42 +475,47 @@ export class ProductsService {
     if (['success','ok','done','completed','complete'].includes(s)) return 'done';
     if (['failed','fail','error','rejected','cancelled','canceled'].includes(s)) return 'failed';
     if (['sent','accepted','queued','queue'].includes(s)) return 'sent';
-    // pending/processing
     return 'processing';
   }
 
   /** محاولة إرسال الطلب تلقائيًا حسب إعدادات التوجيه (مع تجربة fallback مرة واحدة إن لزم) */
-  private async tryAutoDispatch(orderId: string) {
+  private async tryAutoDispatch(orderId: string, tenantId?: string) {
     const order = await this.ordersRepo.findOne({
-      where: { id: orderId },
+      where: { id: orderId } as any,
       relations: ['package', 'product', 'user'],
     });
     if (!order) return;
+
+    this.ensureSameTenant((order as any).user?.tenantId, tenantId);
+
+    // ✅ tenantId الفعّال لهذا التنفيذ
+    const effectiveTenantId = String(tenantId ?? (order as any)?.user?.tenantId);
+    // إن أردت التشديد:
+    // if (!effectiveTenantId) throw new BadRequestException('tenantId is required');
+
     if (order.providerId || order.externalOrderId || order.status !== 'pending') return;
 
+    // قيّد الـ routing بالتينانت
     const routing = await this.routingRepo.findOne({
-      where: { package: { id: order.package.id } as any },
+      where: { package: { id: order.package.id } as any, tenantId: effectiveTenantId } as any,
       relations: ['package'],
     });
     if (!routing || routing.mode !== 'auto') return;
 
-    // =========================
     // 🟢 توجيه داخلي: قسم الأكواد
-    // =========================
     if (routing.providerType === 'internal_codes' && routing.codeGroupId) {
       await this.ordersRepo.manager.transaction(async (trx) => {
         const itemRepo = trx.getRepository(CodeItem);
         const orderRepo = trx.getRepository(ProductOrder);
         const logRepo = trx.getRepository(OrderDispatchLog);
 
-        // 1) جلب أول كود متاح (FIFO)
+        // احجز أقدم كود متاح ضمن نفس التينانت والمجموعة
         const code = await itemRepo.findOne({
-          where: { groupId: routing.codeGroupId as any, status: 'available' },
+          where: { groupId: routing.codeGroupId as any, status: 'available', tenantId: effectiveTenantId } as any,
           order: { createdAt: 'ASC' },
-          lock: { mode: 'pessimistic_write' }, // حماية من السباق
+          lock: { mode: 'pessimistic_write' },
         });
         if (!code) {
-          // نسجّل محاولة فاشلة ونخرج بدون رمي استثناء يعطّل بقية النظام
           await logRepo.save(
             logRepo.create({
               order,
@@ -558,18 +528,16 @@ export class ProductsService {
           return;
         }
 
-        // 2) وسم الكود كمستخدم وربطه بالطلب
         code.status = 'used';
         code.orderId = order.id;
         code.usedAt = new Date();
         await itemRepo.save(code);
 
-        // 3) كتابة الكود في ملاحظة الطلب + إنهاء الطلب بالقبول
         const codeText = `CODE: ${code.pin ?? ''}${code.serial ? (code.pin ? ' / ' : '') + code.serial : ''}`.trim();
         const nowIso = new Date().toISOString();
 
         order.status = 'approved';
-        order.externalStatus = 'done' as any; // حالة خارجية منتهية للتوافق
+        order.externalStatus = 'done' as any;
         order.lastMessage = codeText.slice(0, 250);
         order.notes = [
           ...(Array.isArray(order.notes) ? order.notes : []),
@@ -580,7 +548,6 @@ export class ProductsService {
 
         await orderRepo.save(order);
 
-        // 4) لوج العملية
         await logRepo.save(
           logRepo.create({
             order,
@@ -596,18 +563,20 @@ export class ProductsService {
         );
       });
 
-      // تم التعامل مع الطلب داخليًا — لا نكمل لمنطق المزود الخارجي
       return;
     }
 
-    // =========================
-    // 🔵 مزوّد خارجي (المنطق الحالي)
-    // =========================
+    // 🔵 مزوّد خارجي
     if (!routing.primaryProviderId) return;
 
     const tryOnce = async (providerId: string) => {
+      // احضر الـ mapping ضمن نفس التينانت
       const mapping = await this.mappingRepo.findOne({
-        where: { our_package_id: order.package.id, provider_api_id: providerId },
+        where: {
+          our_package_id: order.package.id,
+          provider_api_id: providerId,
+          tenantId: effectiveTenantId,
+        } as any,
       });
       if (!mapping) {
         throw new Error('لا يوجد ربط لهذه الباقة عند هذا المزوّد');
@@ -624,8 +593,9 @@ export class ProductsService {
         clientOrderUuid: order.id,
       };
 
-      const placed = await this.integrations.placeOrder(providerId, payload);
-      const cfg = await this.integrations.get(providerId);
+      // ✅ مرّر tenantId إلى خدمات التكامل
+      const placed = await this.integrations.placeOrder(providerId, effectiveTenantId, payload);
+      const cfg = await this.integrations.get(providerId, effectiveTenantId);
 
       let priceCurrency: string | undefined =
         (placed as any)?.costCurrency ||
@@ -648,7 +618,7 @@ export class ProductsService {
 
       order.providerId = providerId;
       order.externalOrderId = (placed as any)?.externalOrderId ?? null;
-      order.externalStatus = this.mapMappedToExternalStatus((placed as any)?.mappedStatus);
+      order.externalStatus = this.mapMappedToExternalStatus((placed as any)?.mappedStatus) as any;
       order.sentAt = new Date();
       order.lastSyncAt = new Date();
       order.lastMessage = String(
@@ -672,7 +642,7 @@ export class ProductsService {
       );
 
       if (order.externalStatus === 'done') {
-        await this.updateOrderStatus(order.id, 'approved');
+        await this.updateOrderStatus(order.id, 'approved', effectiveTenantId);
       } else if (order.externalStatus === 'failed') {
         throw new Error('primary dispatch failed (mapped as failed)');
       }
@@ -692,55 +662,48 @@ export class ProductsService {
       );
     }
 
-      // بعد تسجيل الفشل للـ primary
-      if (routing.fallbackProviderId) {
-        try {
-          await tryOnce(routing.fallbackProviderId);
-          return;
-        } catch (err2: any) {
-          await this.logsRepo.save(this.logsRepo.create({
+    if (routing.fallbackProviderId) {
+      try {
+        await tryOnce(routing.fallbackProviderId);
+        return;
+      } catch (err2: any) {
+        await this.logsRepo.save(
+          this.logsRepo.create({
             order,
             action: 'dispatch',
             result: 'fail',
             message: String(err2?.message || 'failed to dispatch (fallback)').slice(0, 250),
-          }));
-          // ✅ هنا القرار النهائي: رفض
-          order.externalStatus = 'failed' as any;
-          order.completedAt = new Date();
-          order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : 0;
-          await this.ordersRepo.save(order);
-          await this.updateOrderStatus(order.id, 'rejected'); // ← نغلق الطلب كمرفوض
-          return;
-        }
+          }),
+        );
+        order.externalStatus = 'failed' as any;
+        order.completedAt = new Date();
+        order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : 0;
+        await this.ordersRepo.save(order);
+        await this.updateOrderStatus(order.id, 'rejected', effectiveTenantId);
+        return;
       }
+    }
 
-      // لا primary ولا fallback نجحوا → (كان Manualize) الآن نخليها رفض لو الـ primary رجّع failed صريح
-      order.externalStatus = 'failed' as any;
-      order.completedAt = new Date();
-      order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : 0;
-      await this.ordersRepo.save(order);
-      await this.updateOrderStatus(order.id, 'rejected');
-
+    // إذا فشل الأساسي ولم يوجد بديل
+    order.externalStatus = 'failed' as any;
+    order.completedAt = new Date();
+    order.durationMs = order.sentAt ? order.completedAt.getTime() - order.sentAt.getTime() : 0;
+    await this.ordersRepo.save(order);
+    await this.updateOrderStatus(order.id, 'rejected', effectiveTenantId);
   }
-  
-  // ================ الطلبات =============
 
-async createOrder(data: {
-  productId: string;
-  packageId: string;
-  quantity: number;
-  userId: string;
-  userIdentifier?: string;
-  extraField?: string; 
-}) {
-  const {
-    productId,
-    packageId,
-    quantity,
-    userId,
-    userIdentifier,
-    extraField,
-  } = data;
+  async createOrder(
+    data: {
+      productId: string;
+      packageId: string;
+      quantity: number;
+      userId: string;
+      userIdentifier?: string;
+      extraField?: string;
+    },
+    tenantId?: string,
+  ) {
+    const { productId, packageId, quantity, userId, userIdentifier, extraField } = data;
 
     if (!quantity || quantity <= 0 || !Number.isFinite(Number(quantity))) {
       throw new BadRequestException('Quantity must be a positive number');
@@ -749,39 +712,50 @@ async createOrder(data: {
     const created = await this.ordersRepo.manager.transaction(async (trx) => {
       const productsRepo = trx.getRepository(Product);
       const packagesRepo = trx.getRepository(ProductPackage);
-      const usersRepo = trx.getRepository(User);
-      const ordersRepo = trx.getRepository(ProductOrder);
+      const usersRepo    = trx.getRepository(User);
+      const ordersRepo   = trx.getRepository(ProductOrder);
 
-      const [product, user] = await Promise.all([
-        productsRepo.findOne({ where: { id: productId } }),
-        usersRepo.findOne({ where: { id: userId }, relations: ['currency'] }),
-      ]);
-      if (!product) throw new NotFoundException('المنتج غير موجود');
+      // جلب المستخدم + العملة
+      const user = await usersRepo.findOne({ where: { id: userId } as any, relations: ['currency'] });
       if (!user) throw new NotFoundException('المستخدم غير موجود');
+
+      // 🔐 تأكيد أن الطلب ينتمي لنفس المستأجر المتوقع (إن تم تمريره)
+      this.ensureSameTenant((user as any).tenantId, tenantId);
 
       if (user.isActive === false) {
         throw new ConflictException('الحساب غير فعّال');
       }
 
-      const unitPriceUSD = await this.getEffectivePriceUSD(packageId, userId);
-      const totalUSD = Number(unitPriceUSD) * Number(quantity);
+      // جلب المنتج والباقة وتحقق المستأجر
+      const [product, pkg] = await Promise.all([
+        productsRepo.findOne({ where: { id: productId } as any }),
+        packagesRepo.findOne({ where: { id: packageId } as any }),
+      ]);
+      if (!product) throw new NotFoundException('المنتج غير موجود');
+      if (!pkg)     throw new NotFoundException('الباقة غير موجودة');
 
-      const rate = user.currency ? Number(user.currency.rate) : 1;
-      const code = user.currency ? user.currency.code : 'USD';
+      // ✅ تأكد أن المنتج والباقة بنفس مستأجر المستخدم
+      this.ensureSameTenant((product as any).tenantId, (user as any).tenantId);
+      this.ensureSameTenant((pkg as any).tenantId,     (user as any).tenantId);
+
+      // التسعير بالدولار (الدالة تتحقق من المستأجر داخليًا)
+      const unitPriceUSD = await this.getEffectivePriceUSD(packageId, userId);
+      const totalUSD     = Number(unitPriceUSD) * Number(quantity);
+
+      const rate      = user.currency ? Number(user.currency.rate) : 1;
+      const code      = user.currency ? user.currency.code : 'USD';
       const totalUser = totalUSD * rate;
 
-      const balance = Number(user.balance) || 0;
+      // خصم الرصيد + تحقق حد السالب
+      const balance   = Number(user.balance) || 0;
       const overdraft = Number(user.overdraftLimit) || 0;
       if (totalUser > balance + overdraft) {
         throw new ConflictException('الرصيد غير كافٍ (تجاوز حد السالب المسموح)');
       }
-
       user.balance = balance - totalUser;
       await usersRepo.save(user);
 
-      const pkg = await packagesRepo.findOne({ where: { id: packageId } });
-      if (!pkg) throw new NotFoundException('الباقة غير موجودة');
-
+      // إنشاء الطلب
       const order = ordersRepo.create({
         product,
         package: pkg,
@@ -790,28 +764,29 @@ async createOrder(data: {
         status: 'pending',
         user,
         userIdentifier: userIdentifier ?? null,
-        extraField: extraField ?? null,
-      });
+        extraField:     extraField ?? null,
+      }) as ProductOrder;
 
-      const saved = await ordersRepo.save(order);
-      console.log('[SERVICE createOrder] created order', {
-      orderId: saved.id,
-      userId: user.id,
-      packageId: pkg.id,
-      qty: quantity,
-      unitPriceUSD,
-      totalUSD,
-      userCurrency: code,
-      totalUser,
-      balanceAfter: user.balance,
-    });
+      // 🧷 تضمين tenantId صراحةً على الكيان
+      (order as any).tenantId = (user as any).tenantId;
 
+      const saved = await ordersRepo.save<ProductOrder>(order);
 
-      // ❌ لا نُرسل إشعار خصم هنا (سنرسل إشعارًا موحّدًا عند القبول/الرفض)
-      // await this.notifications.walletDebit(user.id, totalUser, saved.id, {
-      //   packageName: pkg.name,
-      //   userIdentifier: userIdentifier ?? undefined,
-      // });
+      // عرض مختصر
+      type OrderView = {
+        id: string;
+        status: 'pending' | 'approved' | 'rejected';
+        quantity: number;
+        priceUSD: number;
+        unitPriceUSD: number;
+        display: { currencyCode: string; unitPrice: number; totalPrice: number };
+        product: { id: string; name: string | null };
+        package: { id: string; name: string | null };
+        userIdentifier: string | null;
+        extraField: string | null;
+        createdAt: Date;
+      };
+
       return {
         entityId: saved.id,
         view: {
@@ -825,26 +800,30 @@ async createOrder(data: {
             unitPrice: unitPriceUSD * rate,
             totalPrice: totalUser,
           },
-          product: { id: product.id, name: product.name },
-          package: { id: pkg.id, name: pkg.name },
+          product: { id: product.id, name: product.name ?? null },
+          package: { id: pkg.id, name: pkg.name ?? null },
           userIdentifier: saved.userIdentifier ?? null,
-          extraField: saved.extraField ?? null,
+          extraField:     saved.extraField ?? null,
           createdAt: saved.createdAt,
-        },
+        } satisfies OrderView,
       };
     });
 
+    // محاولة إرسال تلقائي ضمن نفس المستأجر
     try {
-      await this.tryAutoDispatch(created.entityId);
-    } catch (e) {
-    }
+      await this.tryAutoDispatch(created.entityId, tenantId);
+    } catch {}
 
     return created.view;
   }
 
   // داخل class ProductsService
-  async getAllOrders(status?: OrderStatus) {
-    const currencies = await this.currenciesRepo.find();
+  async getAllOrders(status?: OrderStatus, tenantId?: string) {
+    // ✅ اجلب أسعار العملات ضمن نفس التينانت (لو مُمرَّر)، وإلا fallback للكل
+    const currencies = await (tenantId
+      ? this.currenciesRepo.find({ where: { tenantId } as any })
+      : this.currenciesRepo.find());
+
     const getRate = (code: string) => {
       const row = currencies.find((c) => c.code.toUpperCase() === code.toUpperCase());
       return row ? Number(row.rate) : undefined;
@@ -859,20 +838,13 @@ async createOrder(data: {
       return amount * (TRY_RATE / r);
     };
 
-    // ✅ helper محلي لالتقاط أول رابط صورة صالح دون اصطدام مع أنواع الـ Entity
     const pickImage = (obj: any): string | null => {
       if (!obj) return null;
-      return (
-        obj.imageUrl ??
-        obj.image ??
-        obj.logoUrl ??
-        obj.iconUrl ??
-        obj.icon ??
-        null
-      );
+      return obj.imageUrl ?? obj.image ?? obj.logoUrl ?? obj.iconUrl ?? obj.icon ?? null;
     };
 
-    const integrations = await this.integrations.list();
+    // (نبقيها كما هي لتجنّب كسر التواقيع؛ خدمة integrations.list قد تكون تُراعي التينانت أصلاً)
+    const integrations = await this.integrations.list(String(tenantId));
     const providersMap = new Map<string, string>();
     for (const it of integrations as any[]) providersMap.set(it.id, it.provider);
 
@@ -885,6 +857,7 @@ async createOrder(data: {
       .orderBy('order.createdAt', 'DESC');
 
     if (status) query.where('order.status = :status', { status });
+    this.addTenantWhere(query, 'user', tenantId); // ✅ نقيّد حسب tenant عبر المستخدم
 
     const orders = await query.getMany();
 
@@ -953,11 +926,7 @@ async createOrder(data: {
           if (!cur) cur = 'USD';
           costTRY = toTRY(amt, cur);
         } else {
-          const baseUSD = Number(
-            (order as any).package?.basePrice ??
-            (order as any).package?.capital ??
-            0
-          );
+          const baseUSD = Number((order as any).package?.basePrice ?? (order as any).package?.capital ?? 0);
           const qty = Number(order.quantity ?? 1);
           costTRY = (baseUSD * qty) * TRY_RATE;
         }
@@ -991,11 +960,7 @@ async createOrder(data: {
         unitPrice: unitUser,
         priceUSD,
         unitPriceUSD,
-        display: {
-          currencyCode: userCode,
-          unitPrice: unitUser,
-          totalPrice: totalUser,
-        },
+        display: { currencyCode: userCode, unitPrice: unitUser, totalPrice: totalUser },
 
         currencyTRY: 'TRY',
         sellTRY,
@@ -1016,35 +981,26 @@ async createOrder(data: {
         userEmail: order.user?.email || 'غير معروف',
         extraField: (order as any).extraField ?? null,
 
-        product: {
-          id: order.product?.id,
-          name: order.product?.name,
-          imageUrl: pickImage((order as any).product),
-        },
-        package: {
-          id: order.package?.id,
-          name: order.package?.name,
-          imageUrl: pickImage((order as any).package),
-        },
+        product: { id: order.product?.id, name: order.product?.name, imageUrl: pickImage((order as any).product) },
+        package: { id: order.package?.id, name: order.package?.name, imageUrl: pickImage((order as any).package) },
 
-        /* ✅ الإضافات المفقودة */
         providerMessage: (order as any).providerMessage ?? (order as any).lastMessage ?? null,
         pinCode:        (order as any).pinCode ?? null,
         notesCount:     Array.isArray((order as any).notes) ? (order as any).notes.length : 0,
         manualNote:     (order as any).manualNote ?? null,
-        lastMessage:    (order as any).lastMessage ?? null, // لو احتاجها toClient كـ fallback
+        lastMessage:    (order as any).lastMessage ?? null,
       };
-
     });
   }
 
   // ------------------
-  async getUserOrders(userId: string) {
+  async getUserOrders(userId: string, tenantId?: string) {
     const user = await this.usersRepo.findOne({
-      where: { id: userId },
+      where: { id: userId } as any,
       relations: ['currency'],
     });
     if (!user) throw new NotFoundException('المستخدم غير موجود');
+    if (tenantId) this.ensureSameTenant((user as any).tenantId, tenantId);
 
     const rate = user.currency ? Number(user.currency.rate) : 1;
     const code = user.currency ? user.currency.code : 'USD';
@@ -1054,20 +1010,10 @@ async createOrder(data: {
       relations: ['product', 'package'],
       order: { createdAt: 'DESC' as any },
     });
-    // التقط أول رابط صورة متاح تحت عدد من الأسماء الشائعة
-    const pickImage = (obj: any): string | null => {
-      if (!obj) return null;
-      return (
-        obj.imageUrl ??
-        obj.image ??
-        obj.logoUrl ??
-        obj.iconUrl ??
-        obj.icon ??
-        null
-      );
-    };
 
-    // داخل return orders.map(...) في getUserOrders
+    const pickImage = (obj: any): string | null =>
+      obj ? (obj.imageUrl ?? obj.image ?? obj.logoUrl ?? obj.iconUrl ?? obj.icon ?? null) : null;
+
     return orders.map((order) => {
       const priceUSD = Number(order.price) || 0;
       const unitPriceUSD = order.quantity ? priceUSD / Number(order.quantity) : priceUSD;
@@ -1087,31 +1033,20 @@ async createOrder(data: {
         userIdentifier: order.userIdentifier ?? null,
         extraField: (order as any).extraField ?? null,
 
-        // ✅ أضف هذي
         providerMessage: (order as any).providerMessage ?? (order as any).lastMessage ?? null,
         pinCode: (order as any).pinCode ?? null,
         lastMessage: (order as any).lastMessage ?? null,
 
-        product: {
-          id: order.product.id,
-          name: order.product.name,
-          imageUrl: (order.product as any)?.imageUrl ?? null,
-        },
-        package: {
-          id: order.package.id,
-          name: order.package.name,
-          imageUrl: (order.package as any)?.imageUrl ?? null,
-          productId: order.product.id,
-        },
+        product: { id: order.product.id, name: order.product.name, imageUrl: pickImage(order.product) },
+        package: { id: order.package.id, name: order.package.name, imageUrl: pickImage(order.package), productId: order.product.id },
       };
     });
-
   }
 
   // =============== ✅ تجميد FX عند الاعتماد (Idempotent) ===============
   private async freezeFxOnApprovalIfNeeded(orderId: string): Promise<void> {
     const order = await this.ordersRepo.findOne({
-      where: { id: orderId },
+      where: { id: orderId } as any,
       relations: ['user', 'user.currency', 'package'],
     });
     if (!order) return;
@@ -1119,7 +1054,13 @@ async createOrder(data: {
     const locked = (order as any).fxLocked === true;
     if (locked) return;
 
-    const tryRow = await this.currenciesRepo.findOne({ where: { code: 'TRY', isActive: true } });
+    // ✅ اجلب TRY الخاص بنفس التينانت (إن وُجد)
+    const tenantId = (order as any).user?.tenantId as string | undefined;
+    const tryRow = await this.currenciesRepo.findOne({
+      where: tenantId
+        ? ({ code: 'TRY', isActive: true, tenantId } as any)
+        : ({ code: 'TRY', isActive: true } as any),
+    });
     const fxUsdTry = tryRow?.rate ? Number(tryRow.rate) : 1;
 
     const priceUSD = Number(order.price || 0);
@@ -1130,12 +1071,16 @@ async createOrder(data: {
     let costCur = (order.costCurrency as any) ? String(order.costCurrency).toUpperCase().trim() : '';
     if (costAmount && costAmount > 0) {
       if (!costCur) costCur = 'USD';
+
       if (costCur === 'TRY') {
         costTryAtApproval = Number(costAmount.toFixed(2));
       } else if (costCur === 'USD') {
         costTryAtApproval = Number((costAmount * fxUsdTry).toFixed(2));
       } else {
-        const curRow = await this.currenciesRepo.findOne({ where: { code: costCur } });
+        // ✅ لو عملة أخرى، نجيب سعرها من نفس التينانت إن أمكن
+        const curRow = await this.currenciesRepo.findOne({
+          where: tenantId ? ({ code: costCur, tenantId } as any) : ({ code: costCur } as any),
+        });
         const r = curRow?.rate ? Number(curRow.rate) : undefined;
         costTryAtApproval = r && r > 0 ? Number((costAmount * (fxUsdTry / r)).toFixed(2)) : Number(costAmount.toFixed(2));
       }
@@ -1176,13 +1121,15 @@ async createOrder(data: {
   }
 
   // ------------------------
-  async updateOrderStatus(orderId: string, status: OrderStatus) {
-    // 👈 نحتاج الباقة هنا لكتابة اسمها في الإشعار
+  async updateOrderStatus(orderId: string, status: OrderStatus, tenantId?: string) {
     const order = await this.ordersRepo.findOne({
-      where: { id: orderId },
+      where: { id: orderId } as any,
       relations: ['user', 'user.currency', 'package'],
     });
     if (!order) return null;
+    
+    // ✅ تعريف مرّة وحدة
+    const effectiveTenantId = String(tenantId ?? (order as any)?.user?.tenantId);
 
     const row = await this.ordersRepo.query(
       `SELECT "approvedLocalDate" FROM "product_orders" WHERE id = $1 LIMIT 1`,
@@ -1192,16 +1139,21 @@ async createOrder(data: {
       row?.[0]?.approvedLocalDate ? new Date(row[0].approvedLocalDate) : null;
 
     if (order.status === 'approved' && status !== 'approved') {
-      await this.accounting.assertApprovedMonthOpen(approvedLocalDate);
+      const approvedLocalDateStr =
+        approvedLocalDate ? approvedLocalDate.toISOString().slice(0, 10) : undefined;
+
+      if (approvedLocalDateStr) {
+        await this.accounting.assertApprovedMonthOpen(approvedLocalDateStr);
+      }
     }
 
     const prevStatus = order.status;
     console.log('[SERVICE updateOrderStatus] change', {
-    orderId: orderId,
-    prevStatus,
-    nextStatus: status,
-    userId: order.user?.id,
-  });
+      orderId: orderId,
+      prevStatus,
+      nextStatus: status,
+      userId: order.user?.id,
+    });
 
     const user = order.user;
 
@@ -1211,16 +1163,12 @@ async createOrder(data: {
 
     let deltaUser = 0;
 
-    // استرجاع عند الرفض (من غير تكرار إشعارات منفصلة)
     if (status === 'rejected' && prevStatus !== 'rejected') {
       user.balance = Number(user.balance || 0) + amountInUserCurrency;
       await this.usersRepo.save(user);
       deltaUser = amountInUserCurrency;
-
-      // ❌ لا نرسل walletTopup إشعارًا منفصلًا
     }
 
-    // إعادة الخصم عند الموافقة بعد رفض سابق (من غير إشعار منفصل)
     if (status === 'approved' && prevStatus === 'rejected') {
       const balance = Number(user.balance) || 0;
       const overdraft = Number(user.overdraftLimit) || 0;
@@ -1232,23 +1180,16 @@ async createOrder(data: {
       user.balance = balance - amountInUserCurrency;
       await this.usersRepo.save(user);
       deltaUser = -amountInUserCurrency;
-
-      // ❌ لا نرسل walletDebit إشعارًا منفصلًا
     }
 
     order.status = status;
     const saved = await this.ordersRepo.save(order);
-    console.log('[SERVICE updateOrderStatus] saved', {
-    orderId: saved.id,
-    status: saved.status,
-  });
-
+    console.log('[SERVICE updateOrderStatus] saved', { orderId: saved.id, status: saved.status });
 
     if (status === 'approved') {
       try { await this.freezeFxOnApprovalIfNeeded(saved.id); } catch {}
     }
     if (prevStatus === 'approved' && status !== 'approved') {
-      // فك التجميد عند الرجوع عن الموافقة
       await this.ordersRepo.update(
         { id: order.id },
         {
@@ -1266,14 +1207,15 @@ async createOrder(data: {
       );
     }
 
-    // ✅ إشعار موحّد بصياغة العربيّة الجديدة + إصلاح توقيع الدالة (نمرّر كائن لا رقم)
+    // ✅ استخدام نفس المتغيّر
     await this.notifications.orderStatusChanged(
       user.id,
+      effectiveTenantId,
       saved.id,
-      prevStatus as any,
-      status as any,
+      prevStatus as 'approved' | 'rejected' | 'pending',
+      status as   'approved' | 'rejected' | 'pending',
       {
-        deltaAmountUserCurrency: deltaUser || 0,
+        deltaAmountUserCurrency: Number(deltaUser || 0),
         packageName: order.package?.name ?? undefined,
         userIdentifier: order.userIdentifier || undefined,
       },
@@ -1283,11 +1225,14 @@ async createOrder(data: {
   }
 
   // ================== أدوات مساعدة للعرض ==================
-  private async getUserDisplayContext(userId: string) {
+  private async getUserDisplayContext(userId: string, tenantId?: string) {
     const user = await this.usersRepo.findOne({
-      where: { id: userId },
+      where: { id: userId } as any,
       relations: ['currency', 'priceGroup'],
     });
+    if (!user) throw new NotFoundException('المستخدم غير موجود');
+    // 🔐 تأكد انتماء المستخدم لنفس المستأجر (إن تم تمرير tenantId)
+    this.ensureSameTenant((user as any).tenantId, tenantId);
 
     let rate = 1;
     let code = 'USD';
@@ -1340,10 +1285,11 @@ async createOrder(data: {
     };
   }
 
-  async findAllForUser(userId: string) {
-    const { rate, code, priceGroupId } = await this.getUserDisplayContext(userId);
+  async findAllForUser(tenantId: string, userId: string) {
+    const { rate, code, priceGroupId } = await this.getUserDisplayContext(userId, tenantId);
 
     const products = await this.productsRepo.find({
+      where: { tenantId } as any,
       relations: ['packages', 'packages.prices', 'packages.prices.priceGroup'],
       order: { name: 'ASC' },
     });
@@ -1354,11 +1300,11 @@ async createOrder(data: {
     };
   }
 
-  async findOneForUser(productId: string, userId: string) {
-    const { rate, code, priceGroupId } = await this.getUserDisplayContext(userId);
+  async findOneForUser(tenantId: string, productId: string, userId: string) {
+    const { rate, code, priceGroupId } = await this.getUserDisplayContext(userId, tenantId);
 
     const product = await this.productsRepo.findOne({
-      where: { id: productId },
+      where: { id: productId, tenantId } as any,
       relations: ['packages', 'packages.prices', 'packages.prices.priceGroup'],
     });
     if (!product) throw new NotFoundException('لم يتم العثور على المنتج');
@@ -1369,8 +1315,7 @@ async createOrder(data: {
     };
   }
 
-  // داخل class ProductsService
-  async listOrdersWithPagination(dto: ListOrdersDto) {
+  async listOrdersWithPagination(dto: ListOrdersDto, tenantId?: string) {
     const limit = Math.max(1, Math.min(100, dto.limit ?? 25));
     const cursor = decodeCursor(dto.cursor);
 
@@ -1381,36 +1326,23 @@ async createOrder(data: {
       .leftJoinAndSelect('o.package', 'pkg')
       .leftJoinAndSelect('o.product', 'prod');
 
-    // الحالة
-    if (dto.status) {
-      qb.andWhere('o.status = :status', { status: dto.status });
+    const userIdFilter = (dto as any)?.userId as string | undefined;
+    if (userIdFilter) {
+      qb.andWhere('u.id = :uid', { uid: userIdFilter });
     }
 
-    // طريقة التنفيذ: '' | 'manual' | providerId
+    if (dto.status) qb.andWhere('o.status = :status', { status: dto.status });
     if (dto.method === 'manual') {
       qb.andWhere('(o.providerId IS NULL OR o.externalOrderId IS NULL)');
     } else if (dto.method) {
-      qb.andWhere('o.providerId = :pid AND o.externalOrderId IS NOT NULL', {
-        pid: dto.method,
-      });
+      qb.andWhere('o.providerId = :pid AND o.externalOrderId IS NOT NULL', { pid: dto.method });
     }
-
-    // التاريخ
-    if (dto.from) {
-      qb.andWhere('o.createdAt >= :from', {
-        from: new Date(dto.from + 'T00:00:00Z'),
-      });
-    }
-    if (dto.to) {
-      qb.andWhere('o.createdAt <= :to', {
-        to: new Date(dto.to + 'T23:59:59Z'),
-      });
-    }
+    if (dto.from) qb.andWhere('o.createdAt >= :from', { from: new Date(dto.from + 'T00:00:00Z') });
+    if (dto.to)   qb.andWhere('o.createdAt <= :to',   { to:   new Date(dto.to   + 'T23:59:59Z') });
 
     const _q = (dto.q ?? '').trim();
     if (_q) {
       if (/^\d+$/.test(_q)) {
-        // كله أرقام: طابق حقول رقمية/نصية رقمية بتطابق تام
         const qd = _q;
         qb.andWhere(new Brackets((b) => {
           b.where('CAST(o.orderNo AS TEXT) = :qd', { qd })
@@ -1418,7 +1350,6 @@ async createOrder(data: {
             .orWhere('o.externalOrderId = :qd', { qd });
         }));
       } else {
-        // نص حر: ابحث في اسم المنتج/الباقة/المستخدم/الإيميل/المعرف/المرجع الخارجي
         const q = `%${_q.toLowerCase()}%`;
         qb.andWhere(new Brackets((b) => {
           b.where('LOWER(prod.name) LIKE :q', { q })
@@ -1431,8 +1362,9 @@ async createOrder(data: {
       }
     }
 
+    // 🔐 تقييد المستأجر
+    this.addTenantWhere(qb, 'u', tenantId);
 
-    // Keyset cursor
     if (cursor) {
       qb.andWhere(new Brackets((b) => {
         b.where('o.createdAt < :cts', { cts: new Date(cursor.ts) })
@@ -1443,25 +1375,16 @@ async createOrder(data: {
       }));
     }
 
-    // ترتيب + حد
-    qb.orderBy('o.createdAt', 'DESC')
-      .addOrderBy('o.id', 'DESC')
-      .take(limit + 1);
+    qb.orderBy('o.createdAt', 'DESC').addOrderBy('o.id', 'DESC').take(limit + 1);
 
-    // جلب البيانات
     const rows = await qb.getMany();
     const hasMore = rows.length > limit;
     const pageItems = hasMore ? rows.slice(0, limit) : rows;
 
-    const last = pageItems[pageItems.length - 1] || null;
-    const nextCursor = last
-      ? encodeCursor(toEpochMs(last.createdAt as any), String(last.id))
-      : null;
-
-    // ====== حسابات TRY مثل getAllOrders ======
-
-    // أسعار الصرف
-    const currencies = await this.currenciesRepo.find();
+    // ====== حسابات TRY مثل getAllOrders (✅ بحدود التينانت) ======
+    const currencies = await (tenantId
+      ? this.currenciesRepo.find({ where: { tenantId } as any })
+      : this.currenciesRepo.find());
     const getRate = (code: string) => {
       const row = currencies.find((c) => c.code.toUpperCase() === code.toUpperCase());
       return row ? Number(row.rate) : undefined;
@@ -1469,25 +1392,18 @@ async createOrder(data: {
     const TRY_RATE = getRate('TRY') ?? 1;
     const toTRY = (amount: number, code?: string) => {
       const c = (code || 'TRY').toUpperCase();
-      if (c === 'TRY') return amount;
       const r = getRate(c);
       return r && r > 0 ? amount * (TRY_RATE / r) : amount;
     };
 
-    // معرّف نوع المزوّد (للتحويل الخاص بـ znet)
-    const integrations = await this.integrations.list();
+    const integrations = await this.integrations.list(tenantId ?? '');
     const providerKind = new Map<string, string>();
     for (const it of integrations as any[]) providerKind.set(it.id, it.provider);
 
-    // أداة صورة
     const pickImage = (obj: any): string | null =>
       obj ? (obj.imageUrl ?? obj.image ?? obj.logoUrl ?? obj.iconUrl ?? obj.icon ?? null) : null;
 
-    // المجمّدات للطلبات المعتمدة
-    const approvedIds = pageItems
-      .filter((o) => o.status === 'approved')
-      .map((o) => o.id);
-
+    const approvedIds = pageItems.filter((o) => o.status === 'approved').map((o) => o.id);
     let frozenMap = new Map<
       string,
       {
@@ -1516,128 +1432,118 @@ async createOrder(data: {
           String(r.id),
           {
             fxLocked: !!r.fxLocked,
-            sellTryAtApproval:
-              r.sellTryAtApproval != null ? Number(r.sellTryAtApproval) : null,
-            costTryAtApproval:
-              r.costTryAtApproval != null ? Number(r.costTryAtApproval) : null,
-            profitTryAtApproval:
-              r.profitTryAtApproval != null ? Number(r.profitTryAtApproval) : null,
+            sellTryAtApproval: r.sellTryAtApproval != null ? Number(r.sellTryAtApproval) : null,
+            costTryAtApproval: r.costTryAtApproval != null ? Number(r.costTryAtApproval) : null,
+            profitTryAtApproval: r.profitTryAtApproval != null ? Number(r.profitTryAtApproval) : null,
             approvedLocalDate: r.approvedLocalDate ? String(r.approvedLocalDate) : null,
           },
         ]),
       );
     }
 
-  const items = pageItems.map((o) => {
-    // إجمالي بالدولار المخزّن في الطلب
-    const priceUSD = Number((o as any).price || 0);
-    const unitPriceUSD = o.quantity ? priceUSD / Number(o.quantity) : priceUSD;
+    const items = pageItems.map((o) => {
+      const priceUSD = Number((o as any).price || 0);
+      const unitPriceUSD = o.quantity ? priceUSD / Number(o.quantity) : priceUSD;
 
-    const isExternal = !!(o.providerId && o.externalOrderId);
-    const providerType = o.providerId ? providerKind.get(o.providerId) : undefined;
+      const isExternal = !!(o.providerId && o.externalOrderId);
+      const providerType = o.providerId ? providerKind.get(o.providerId) : undefined;
 
-    const frozen = frozenMap.get(o.id);
-    const isFrozen = !!(frozen && frozen.fxLocked && o.status === 'approved');
+      const frozen = frozenMap.get(o.id);
+      const isFrozen = !!(frozen && frozen.fxLocked && o.status === 'approved');
 
-    let sellTRY: number;
-    let costTRY: number;
-    let profitTRY: number;
+      let sellTRY: number;
+      let costTRY: number;
+      let profitTRY: number;
 
-    if (isFrozen) {
-      sellTRY = Number((frozen!.sellTryAtApproval ?? 0).toFixed(2));
-      costTRY = Number((frozen!.costTryAtApproval ?? 0).toFixed(2));
-      const pf =
-        frozen!.profitTryAtApproval != null
-          ? Number(frozen!.profitTryAtApproval)
-          : sellTRY - costTRY;
-      profitTRY = Number(pf.toFixed(2));
-    } else {
-      // التكلفة
-      if (isExternal) {
-        const amt = Math.abs(Number((o as any).costAmount ?? 0));
-        let cur = String((o as any).costCurrency || '').toUpperCase().trim();
-        if (providerType === 'znet') cur = 'TRY';
-        if (!cur) cur = 'USD';
-        costTRY = toTRY(amt, cur);
+      if (isFrozen) {
+        sellTRY = Number((frozen!.sellTryAtApproval ?? 0).toFixed(2));
+        costTRY = Number((frozen!.costTryAtApproval ?? 0).toFixed(2));
+        const pf =
+          frozen!.profitTryAtApproval != null
+            ? Number(frozen!.profitTryAtApproval)
+            : sellTRY - costTRY;
+        profitTRY = Number(pf.toFixed(2));
       } else {
-        const baseUSD = Number(
-          ((o as any).package?.basePrice ?? (o as any).package?.capital ?? 0),
-        );
-        const qty = Number(o.quantity ?? 1);
-        costTRY = baseUSD * qty * TRY_RATE;
+        if (isExternal) {
+          const amt = Math.abs(Number((o as any).costAmount ?? 0));
+          let cur = String((o as any).costCurrency || '').toUpperCase().trim();
+          if (providerType === 'znet') cur = 'TRY';
+          if (!cur) cur = 'USD';
+          costTRY = toTRY(amt, cur);
+        } else {
+          const baseUSD = Number(((o as any).package?.basePrice ?? (o as any).package?.capital ?? 0));
+          const qty = Number(o.quantity ?? 1);
+          costTRY = baseUSD * qty * TRY_RATE;
+        }
+
+        sellTRY = priceUSD * TRY_RATE;
+        profitTRY = sellTRY - costTRY;
+
+        sellTRY = Number(sellTRY.toFixed(2));
+        costTRY = Number(costTRY.toFixed(2));
+        profitTRY = Number(profitTRY.toFixed(2));
       }
 
-      // البيع والربح
-      sellTRY = priceUSD * TRY_RATE;
-      profitTRY = sellTRY - costTRY;
+      const userRate = (o as any).user?.currency ? Number((o as any).user.currency.rate) : 1;
+      const userCode = (o as any).user?.currency ? (o as any).user.currency.code : 'USD';
+      const totalUser = priceUSD * userRate;
+      const unitUser  = unitPriceUSD * userRate;
 
-      // تقريب
-      sellTRY = Number(sellTRY.toFixed(2));
-      costTRY = Number(costTRY.toFixed(2));
-      profitTRY = Number(profitTRY.toFixed(2));
-    }
+      const username = (o as any).user?.username ?? null;
+      const userEmail = (o as any).user?.email ?? null;
 
-    // ✅ تسعير العرض بعملة المستخدم
-    const userRate = (o as any).user?.currency ? Number((o as any).user.currency.rate) : 1;
-    const userCode = (o as any).user?.currency ? (o as any).user.currency.code : 'USD';
-    const totalUser = priceUSD * userRate;
-    const unitUser  = unitPriceUSD * userRate;
+      return {
+        id: o.id,
+        orderNo: (o as any).orderNo ?? null,
+        status: o.status,
+        createdAt: o.createdAt?.toISOString?.() ?? new Date(o.createdAt as any).toISOString(),
+        username,
+        userEmail,
 
-    const username = (o as any).user?.username ?? null;
-    const userEmail = (o as any).user?.email ?? null;
+        providerId: o.providerId ?? null,
+        externalOrderId: o.externalOrderId ?? null,
+        userIdentifier: o.userIdentifier ?? null,
+        extraField: (o as any).extraField ?? null,
+        quantity: o.quantity,
 
-    return {
-      id: o.id,
-      orderNo: (o as any).orderNo ?? null,
-      status: o.status,
-      createdAt: o.createdAt?.toISOString?.() ?? new Date(o.createdAt as any).toISOString(),
-      username,
-      userEmail,
+        priceUSD,
+        unitPriceUSD,
+        display: {
+          currencyCode: userCode,
+          unitPrice: unitUser,
+          totalPrice: totalUser,
+        },
 
-      providerId: o.providerId ?? null,
-      externalOrderId: o.externalOrderId ?? null,
-      userIdentifier: o.userIdentifier ?? null,
-      extraField: (o as any).extraField ?? null,
-      quantity: o.quantity,
+        currencyTRY: 'TRY',
+        sellTRY,
+        costTRY,
+        profitTRY,
 
-      priceUSD,
-      unitPriceUSD,
-      display: {
-        currencyCode: userCode,
-        unitPrice: unitUser,
-        totalPrice: totalUser,
-      },
+        product: o.product
+          ? { id: o.product.id, name: o.product.name, imageUrl: pickImage(o.product) }
+          : null,
+        package: o.package
+          ? { id: o.package.id, name: o.package.name, imageUrl: pickImage(o.package) }
+          : null,
 
-      currencyTRY: 'TRY',
-      sellTRY,
-      costTRY,
-      profitTRY,
+        sentAt: (o as any).sentAt ? (o as any).sentAt.toISOString?.() ?? null : null,
+        completedAt: (o as any).completedAt
+          ? (o as any).completedAt.toISOString?.() ?? null
+          : null,
 
-      product: o.product
-        ? { id: o.product.id, name: o.product.name, imageUrl: pickImage(o.product) }
-        : null,
-      package: o.package
-        ? { id: o.package.id, name: o.package.name, imageUrl: pickImage(o.package) }
-        : null,
+        fxLocked: isFrozen,
+        approvedLocalDate: frozen?.approvedLocalDate ?? null,
 
-      sentAt: (o as any).sentAt ? (o as any).sentAt.toISOString?.() ?? null : null,
-      completedAt: (o as any).completedAt
-        ? (o as any).completedAt.toISOString?.() ?? null
-        : null,
+        providerMessage: (o as any).providerMessage ?? (o as any).lastMessage ?? null,
+        pinCode:        (o as any).pinCode ?? null,
+        notesCount:     Array.isArray((o as any).notes) ? (o as any).notes.length : 0,
+        manualNote:     (o as any).manualNote ?? null,
+        lastMessage:    (o as any).lastMessage ?? null,
+      };
+    });
 
-      fxLocked: isFrozen,
-      approvedLocalDate: frozen?.approvedLocalDate ?? null,
-
-      /* ✅ الإضافات المفقودة */
-      providerMessage: (o as any).providerMessage ?? (o as any).lastMessage ?? null,
-      pinCode:        (o as any).pinCode ?? null,
-      notesCount:     Array.isArray((o as any).notes) ? (o as any).notes.length : 0,
-      manualNote:     (o as any).manualNote ?? null,
-      lastMessage:    (o as any).lastMessage ?? null,
-    };
-
-  });
-
+    const last = items[items.length - 1] || null;
+    const nextCursor = last ? encodeCursor(toEpochMs(new Date(last.createdAt)), String(last.id)) : null;
 
     return {
       items,
@@ -1655,12 +1561,14 @@ async createOrder(data: {
     };
   }
 
-  async listOrdersForAdmin(dto: ListOrdersDto) {
+  async listOrdersForAdmin(dto: ListOrdersDto, tenantId?: string) {
     const limit = Math.max(1, Math.min(100, dto.limit ?? 25));
     const cursor = decodeCursor(dto.cursor);
 
-    // --- أسعار العملات ---
-    const currencies = await this.currenciesRepo.find();
+    // ✅ أسعار العملات حسب التينانت
+    const currencies = await (tenantId
+      ? this.currenciesRepo.find({ where: { tenantId } as any })
+      : this.currenciesRepo.find());
     const getRate = (code: string) => {
       const row = currencies.find((c) => c.code.toUpperCase() === code.toUpperCase());
       return row ? Number(row.rate) : undefined;
@@ -1677,12 +1585,12 @@ async createOrder(data: {
     const pickImage = (obj: any): string | null =>
       obj ? (obj.imageUrl ?? obj.image ?? obj.logoUrl ?? obj.iconUrl ?? obj.icon ?? null) : null;
 
-    // --- خريطة المزوّدين لمعرفة znet إلخ
-    const integrations = await this.integrations.list();
     const providersMap = new Map<string, string>();
-    for (const it of integrations as any[]) providersMap.set(it.id, it.provider);
+    if (tenantId) {
+      const integrations = await this.integrations.list(tenantId);
+      for (const it of integrations as any[]) providersMap.set(it.id, it.provider);
+    }
 
-    // --- الفلاتر + keyset pagination
     const qb = this.ordersRepo
       .createQueryBuilder('o')
       .leftJoinAndSelect('o.user', 'u')
@@ -1721,6 +1629,8 @@ async createOrder(data: {
       }));
     }
 
+    // 🔐 تقييد المستأجر
+    this.addTenantWhere(qb, 'u', tenantId);
 
     if (cursor) {
       qb.andWhere(new Brackets(b => {
@@ -1732,15 +1642,12 @@ async createOrder(data: {
       }));
     }
 
-    qb.orderBy('o.createdAt', 'DESC')
-      .addOrderBy('o.id', 'DESC')
-      .take(limit + 1);
+    qb.orderBy('o.createdAt', 'DESC').addOrderBy('o.id', 'DESC').take(limit + 1);
 
     const rows = await qb.getMany();
     const hasMore = rows.length > limit;
     const pageItems = hasMore ? rows.slice(0, limit) : rows;
 
-    // --- تجميد FX للطلبات المقبولة (نقرأها دفعة واحدة)
     const approvedIds = pageItems.filter(o => o.status === 'approved').map(o => o.id);
     let frozenMap = new Map<string, {
       fxLocked: boolean;
@@ -1806,10 +1713,10 @@ async createOrder(data: {
         } else {
           const baseUSD = Number((o as any).package?.basePrice ?? (o as any).package?.capital ?? 0);
           const qty = Number(o.quantity ?? 1);
-          costTRY = (baseUSD * qty) * TRY_RATE;   // 👈 Manual = تحويل إلى ليرة دائمًا
+          costTRY = (baseUSD * qty) * TRY_RATE;
         }
 
-        sellTRY   = priceUSD * TRY_RATE;         // 👈 سعر المبيع دائمًا بالليرة
+        sellTRY   = priceUSD * TRY_RATE;
         profitTRY = sellTRY - costTRY;
 
         sellTRY   = Number(sellTRY.toFixed(2));
@@ -1853,14 +1760,12 @@ async createOrder(data: {
         durationMs: (o as any).durationMs ?? null,
         createdAt: o.createdAt.toISOString(),
 
-        /* ✅ الإضافات المفقودة */
         providerMessage: (o as any).providerMessage ?? (o as any).lastMessage ?? null,
         pinCode:        (o as any).pinCode ?? null,
         notesCount:     Array.isArray((o as any).notes) ? (o as any).notes.length : 0,
         manualNote:     (o as any).manualNote ?? null,
         lastMessage:    (o as any).lastMessage ?? null,
       };
-
     });
 
     const last = items[items.length - 1] || null;
@@ -1883,13 +1788,13 @@ async createOrder(data: {
   }
 
   // ✅ إضافة/قراءة ملاحظات الطلب
-  async addOrderNote(
-    orderId: string,
-    by: 'admin' | 'system' | 'user',
-    text: string
-  ) {
-    const order = await this.ordersRepo.findOne({ where: { id: orderId } });
+  async addOrderNote(orderId: string, by: 'admin' | 'system' | 'user', text: string, tenantId?: string) {
+    const order = await this.ordersRepo.findOne({
+      where: { id: orderId } as any,
+      relations: ['user'],
+    });
     if (!order) throw new NotFoundException('الطلب غير موجود');
+    this.ensureSameTenant((order as any).user?.tenantId, tenantId);
 
     const now = new Date().toISOString();
     const note = { by, text: String(text || '').slice(0, 500), at: now };
@@ -1902,13 +1807,15 @@ async createOrder(data: {
     return (order as any).notes;
   }
 
-    // ✅ تفاصيل طلب لمستخدم معيّن (مع الملاحظات)
-  async getOrderDetailsForUser(orderId: string, userId: string) {
+  async getOrderDetailsForUser(orderId: string, userId: string, tenantId?: string) {
     const order = await this.ordersRepo.findOne({
-      where: { id: orderId, user: { id: userId } as any },
+      where: { id: orderId, user: { id: userId } as any } as any,
       relations: ['product', 'package', 'user', 'user.currency'],
     });
     if (!order) throw new NotFoundException('الطلب غير موجود');
+
+    // 🔐 تأكيد انتماء الطلب لنفس المستأجر
+    this.ensureSameTenant((order as any).user?.tenantId, tenantId);
 
     const priceUSD = Number(order.price) || 0;
     const rate = order.user?.currency ? Number(order.user.currency.rate) : 1;
@@ -1922,7 +1829,6 @@ async createOrder(data: {
       userIdentifier: order.userIdentifier ?? null,
       extraField: (order as any).extraField ?? null,
 
-      // عرض الأسعار للمستخدم
       priceUSD,
       unitPriceUSD: order.quantity ? priceUSD / Number(order.quantity) : priceUSD,
       display: {
@@ -1931,7 +1837,6 @@ async createOrder(data: {
         totalPrice: priceUSD * rate,
       },
 
-      // معلومات المنتج/الباقة
       product: { id: order.product?.id, name: order.product?.name, imageUrl: (order as any).product?.imageUrl ?? null },
       package: { id: order.package?.id, name: order.package?.name, imageUrl: (order as any).package?.imageUrl ?? null },
 
@@ -1940,10 +1845,4 @@ async createOrder(data: {
       notes: Array.isArray((order as any).notes) ? (order as any).notes : [],
     };
   }
-
-
-} 
-
-
-
-
+}

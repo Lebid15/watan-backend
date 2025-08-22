@@ -1,5 +1,11 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, JoinColumn,
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  ManyToOne,
+  CreateDateColumn,
+  JoinColumn,
+  Index,
 } from 'typeorm';
 import { User } from '../user/user.entity';
 import { PaymentMethod } from './payment-method.entity';
@@ -11,9 +17,15 @@ export enum DepositStatus {
 }
 
 @Entity({ name: 'deposit' })
+@Index(['tenantId', 'status', 'createdAt'])
+@Index(['tenantId', 'user_id'])
 export class Deposit {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  @Column('uuid')
+  @Index()
+  tenantId: string;
 
   /** المستخدم صاحب الطلب */
   @ManyToOne(() => User, { onDelete: 'CASCADE', eager: false })

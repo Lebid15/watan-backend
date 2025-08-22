@@ -20,33 +20,30 @@ import * as dotenv from 'dotenv';
 
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { DataSource } from 'typeorm';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
-  // CORS
-const origins = (process.env.CORS_ORIGIN || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
-// CORS
-app.enableCors({
-  origin: [
-    'https://watan-frontend.onrender.com',
-    'http://localhost:3000',
-  ],
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
-  credentials: false, // فعّل true فقط لو تستخدم كوكيز
-});
-
-
-  // /api prefix
+  // ✅ /api مرة واحدة فقط
   app.setGlobalPrefix('api');
+
+  // ✅ CORS مضبوط للواجهة
+  app.enableCors({
+    origin: [
+      'http://localhost:3000',
+      'https://watan-frontend.onrender.com',
+      'http://ahmad.localhost:3000',
+      'http://saeed.localhost:3000',
+      // نمط عام للنطاقات الفرعية المحلية
+      /^http:\/\/[a-zA-Z0-9-]+\.localhost:3000$/,
+    ],
+    credentials: true, // لازم true لو فيه كوكيز/جلسة
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Host', 'X-Tenant-Id'],
+  });
 
   // Swagger
   const config = new DocumentBuilder()
@@ -64,6 +61,7 @@ app.enableCors({
       'JWT-auth',
     )
     .build();
+
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
 
@@ -71,7 +69,7 @@ app.enableCors({
   const host = process.env.HOST || '0.0.0.0';
   await app.listen(port, host);
 
-  // اختبار اتصال DB
+  // ✅ اختبار اتصال DB
   const dataSource = app.get(DataSource);
   try {
     await dataSource.query('SELECT NOW()');
@@ -84,7 +82,7 @@ app.enableCors({
     console.error('❌ Database connection failed:', error?.message || error);
   }
 
-  // طباعة المسارات
+  // ✅ طباعة المسارات المتاحة
   const httpAdapter = app.getHttpAdapter();
   const instance: any = httpAdapter.getInstance();
   const router = instance?._router;
