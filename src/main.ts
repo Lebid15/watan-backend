@@ -290,6 +290,14 @@ async function bootstrap() {
     console.log('⏭ Root bootstrap disabled (BOOTSTRAP_ENABLED=false)');
   }
 
+  // إحصاءات عامة للمستخدمين العالميين (tenantId NULL)
+  try {
+    const globalRoleStats = await dataSource.query(`SELECT role, count(*) FROM users WHERE "tenantId" IS NULL GROUP BY role`);
+    console.log('[BOOTSTRAP][GLOBAL-STATS] tenantId NULL counts:', globalRoleStats);
+  } catch (e:any) {
+    console.warn('[BOOTSTRAP][GLOBAL-STATS] Failed to read stats:', e.message || e);
+  }
+
   // ================= Bootstrap Developer (Global) =================
   // مفعّل افتراضياً مع BOOTSTRAP_ENABLED، ويستخدم INITIAL_DEV_EMAIL + INITIAL_DEV_PASSWORD
   if ((process.env.BOOTSTRAP_ENABLED || 'true').toLowerCase() === 'true') {
@@ -324,7 +332,7 @@ async function bootstrap() {
           console.log('ℹ️ Developer user already exists');
         }
       } else {
-        console.log('ℹ️ Skipping developer bootstrap (missing INITIAL_DEV_EMAIL or INITIAL_DEV_PASSWORD)');
+  console.log('ℹ️ Skipping developer bootstrap (missing INITIAL_DEV_EMAIL or INITIAL_DEV_PASSWORD). لضبطه أضف في Render: INITIAL_DEV_EMAIL, INITIAL_DEV_PASSWORD ثم أعد النشر.');
       }
     } catch (e: any) {
       console.error('❌ Bootstrap developer user failed:', e?.message || e);
