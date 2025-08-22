@@ -93,18 +93,48 @@ async function bootstrap() {
           ALTER TABLE "product_orders" ADD COLUMN "tenantId" uuid NULL;
       RAISE NOTICE 'Added product_orders.tenantId';
         END IF;
+        -- product.tenantId (جدول المنتجات)
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='product' AND column_name='tenantId'
+        ) THEN
+          ALTER TABLE "product" ADD COLUMN "tenantId" uuid NULL;
+          RAISE NOTICE 'Added product.tenantId';
+        END IF;
+        -- product_packages.tenantId
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='product_packages' AND column_name='tenantId'
+        ) THEN
+          ALTER TABLE "product_packages" ADD COLUMN "tenantId" uuid NULL;
+          RAISE NOTICE 'Added product_packages.tenantId';
+        END IF;
       END$$;
     `);
-    const usersHas = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'`);
-    const ordersHas = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='product_orders' AND column_name='tenantId'`);
-    console.log('🧪 [Preflight] users.tenantId exists?', usersHas[0]?.c === 1, 'product_orders.tenantId exists?', ordersHas[0]?.c === 1);
+    const [usersHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'`);
+    const [ordersHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='product_orders' AND column_name='tenantId'`);
+    const [productHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='product' AND column_name='tenantId'`);
+    const [packagesHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='product_packages' AND column_name='tenantId'`);
+    console.log('🧪 [Preflight] Exists:', {
+      users: usersHas?.c === 1,
+      product_orders: ordersHas?.c === 1,
+      product: productHas?.c === 1,
+      product_packages: packagesHas?.c === 1,
+    });
     // تعبئة tenantId في الطلبات إن وجد المستخدم
     await dataSource.query(`UPDATE "product_orders" o SET "tenantId" = u."tenantId" FROM "users" u WHERE o."userId" = u."id" AND o."tenantId" IS NULL;`);
+    // تعبئة tenantId للـ product_packages من product
+    await dataSource.query(`UPDATE "product_packages" pp SET "tenantId" = p."tenantId" FROM "product" p WHERE pp."product_id" = p."id" AND pp."tenantId" IS NULL;`);
+    // محاولة تعبئة tenantId للـ product من packages (عكسيًا) إذا كان المنتج مفقود tenantId
+    await dataSource.query(`UPDATE "product" p SET "tenantId" = pp."tenantId" FROM "product_packages" pp WHERE pp."product_id" = p."id" AND p."tenantId" IS NULL AND pp."tenantId" IS NOT NULL;`);
     const nullCount = await dataSource.query(`SELECT count(*)::int AS c FROM "product_orders" WHERE "tenantId" IS NULL`);
+    const prodNull = await dataSource.query(`SELECT count(*)::int AS c FROM "product" WHERE "tenantId" IS NULL`);
+    const pkgNull = await dataSource.query(`SELECT count(*)::int AS c FROM "product_packages" WHERE "tenantId" IS NULL`);
     console.log('🧪 [Preflight] product_orders rows with tenantId NULL after fill:', nullCount[0]?.c);
+    console.log('🧪 [Preflight] product rows with tenantId NULL:', prodNull[0]?.c, '| product_packages rows NULL:', pkgNull[0]?.c);
     // فهارس سريعة (إن لم تكن موجودة)
     await dataSource.query(`CREATE INDEX IF NOT EXISTS "idx_users_tenant" ON "users" ("tenantId");`);
     await dataSource.query(`CREATE INDEX IF NOT EXISTS "idx_orders_tenant" ON "product_orders" ("tenantId");`);
+    await dataSource.query(`CREATE INDEX IF NOT EXISTS "idx_product_tenant" ON "product" ("tenantId");`);
+    await dataSource.query(`CREATE INDEX IF NOT EXISTS "idx_product_packages_tenant" ON "product_packages" ("tenantId");`);
     console.log('✅ [Preflight] Tenant columns/indices ensured');
   } catch (e: any) {
     console.warn('⚠️ Preflight tenant columns patch failed (يمكن تجاهله إن وُجدت الأعمدة):', e?.message || e);
