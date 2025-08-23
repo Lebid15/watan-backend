@@ -88,12 +88,18 @@ export class CatalogAdminController {
      ======================= */
   @Get('products/:id/packages')
   async listPackages(@Param('id') productId: string) {
-    const items = await this.packagesRepo.find({
-      where: { catalogProductId: productId },
-      order: { name: 'ASC' },
-      take: 1000,
-    });
-    return { items };
+    try {
+      const items = await this.packagesRepo.find({
+        where: { catalogProductId: productId },
+        order: { name: 'ASC' },
+        take: 1000,
+      });
+      return { items };
+    } catch (err) {
+      // سجل الخطأ وأعد قائمة فارغة ورسالة واضحة
+      console.error('[listPackages] error:', err);
+      return { items: [], error: 'فشل جلب الباقات: تحقق من المنتج أو الربط.' };
+    }
   }
 
   /* ===========================================
