@@ -27,6 +27,7 @@ interface ProviderDriverLike {
 // سواقات فعلية
 import { ZnetProvider } from './providers/znet.provider';
 import { BarakatProvider } from './providers/barakat.provider';
+import { DEV_GLOBAL_TENANT_ID } from './integrations.service';
 
 @Injectable()
 export class CatalogImportService {
@@ -43,8 +44,10 @@ export class CatalogImportService {
    * upsert لكتالوج مزوّد خارجي إلى جداول الكتالوج — مع فرض tenantId
    */
   async importProvider(tenantId: string | null, providerId: string) {
-    const provider = await this.resolveProvider(providerId, tenantId);
-    const external = await this.fetchExternalCatalog(providerId, tenantId);
+  // عند استخدام مزوّد المطوّر (tenantId=null) نخزن الكتالوج على معرف ثابت عالمي
+  const effectiveTenantId = tenantId ?? DEV_GLOBAL_TENANT_ID;
+  const provider = await this.resolveProvider(providerId, tenantId);
+  const external = await this.fetchExternalCatalog(providerId, tenantId);
 
     if (!external?.length) {
       return { createdProducts: 0, updatedProducts: 0, createdPackages: 0, updatedPackages: 0, total: 0 };
@@ -65,7 +68,7 @@ export class CatalogImportService {
 
     // الموجود مسبقًا لنفس المزود ونفس المستأجر
     const existingProducts = await this.catalogProducts.find({
-      where: { tenantId, sourceProviderId: provider.id } as any,
+      where: { tenantId: effectiveTenantId, sourceProviderId: provider.id } as any,
     });
     const productsByExt = new Map<string, CatalogProduct>(
       existingProducts.map((p) => [p.externalProductId ?? '', p]),
@@ -80,7 +83,7 @@ export class CatalogImportService {
 
       if (!existing) {
         const newProductInput: DeepPartial<CatalogProduct> = {
-          tenantId: tenantId || undefined,
+          tenantId: effectiveTenantId,
           name: first.productName,
           description: null,
           imageUrl: first.productImageUrl ?? null,
@@ -109,7 +112,7 @@ export class CatalogImportService {
 
       // ===== الحزم الخاصة بهذا المنتج =====
       const existingPackages = await this.catalogPackages.find({
-        where: { tenantId, catalogProductId: product.id, sourceProviderId: provider.id } as any,
+        where: { tenantId: effectiveTenantId, catalogProductId: product.id, sourceProviderId: provider.id } as any,
       });
       const pkgByExt = new Map<string, CatalogPackage>(
         existingPackages.map((x) => [x.externalPackageId ?? '', x]),
@@ -121,7 +124,7 @@ export class CatalogImportService {
 
         if (!existingPkg) {
           const newPkgInput: DeepPartial<CatalogPackage> = {
-            tenantId: tenantId || undefined,
+            tenantId: effectiveTenantId,
             catalogProductId: product.id,
             name: r.packageName,
             publicCode: this.buildPublicCode(),
