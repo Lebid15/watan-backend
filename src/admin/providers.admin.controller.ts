@@ -18,6 +18,7 @@ import { CatalogImportService } from '../integrations/catalog-import.service';
 import { IntegrationsService, DEV_GLOBAL_TENANT_ID } from '../integrations/integrations.service';
 import { CreateIntegrationDto } from '../integrations/dto/create-integration.dto';
 import { UpdateIntegrationDto } from '../integrations/dto/update-integration.dto';
+import { DataSource } from 'typeorm';
 
 @Controller('admin/providers')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -25,6 +26,7 @@ export class ProvidersAdminController {
   constructor(
     private readonly catalogImport: CatalogImportService,
     private readonly integrations: IntegrationsService,
+  private readonly dataSource: DataSource,
   ) {}
 
   /** استخراج tenantId من الطلب (JWT أو الهيدر) */
@@ -70,6 +72,18 @@ export class ProvidersAdminController {
   async listDevProviders() {
     const items = await this.integrations.list(null, 'dev');
     return { ok: true, items };
+  }
+
+  /** تشخيص: عرض أعمدة جدول integrations للتأكد من نشر العمود scope وغيره */
+  @Get('dev/diag')
+  @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
+  async diagIntegrations() {
+    try {
+      const cols = await this.dataSource.query(`SELECT column_name, data_type FROM information_schema.columns WHERE table_name='integrations' ORDER BY column_name`);
+      return { ok: true, columns: cols };
+    } catch (e:any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
   }
 
   /** تعديل مزوّد مطوّر */
