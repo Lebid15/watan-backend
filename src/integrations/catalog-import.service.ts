@@ -44,10 +44,15 @@ export class CatalogImportService {
    * upsert لكتالوج مزوّد خارجي إلى جداول الكتالوج — مع فرض tenantId
    */
   async importProvider(tenantId: string | null, providerId: string) {
+  const t0 = Date.now();
   // عند استخدام مزوّد المطوّر (tenantId=null) نخزن الكتالوج على معرف ثابت عالمي
   const effectiveTenantId = tenantId ?? DEV_GLOBAL_TENANT_ID;
+  this.logger.log(`[CatalogImport] START providerId=${providerId} tenantId=${tenantId || 'null'} effectiveTenantId=${effectiveTenantId}`);
   const provider = await this.resolveProvider(providerId, tenantId);
+  const fetchStarted = Date.now();
   const external = await this.fetchExternalCatalog(providerId, tenantId);
+  const fetchMs = Date.now() - fetchStarted;
+  this.logger.log(`[CatalogImport] FETCHED providerId=${providerId} items=${external?.length || 0} fetchMs=${fetchMs}`);
 
     if (!external?.length) {
       return { createdProducts: 0, updatedProducts: 0, createdPackages: 0, updatedPackages: 0, total: 0 };
@@ -77,6 +82,10 @@ export class CatalogImportService {
     // ===== المنتجات =====
     for (const [productExternalId, rows] of byProductExtId.entries()) {
       const first = rows[0];
+      const loopIndex = createdProducts + updatedProducts + 1;
+      if (loopIndex % 25 === 1) {
+        this.logger.log(`[CatalogImport] progress productsProcessed=${loopIndex-1} / totalProducts=${byProductExtId.size}`);
+      }
 
       let product: CatalogProduct;
       const existing = productsByExt.get(productExternalId ?? '');
@@ -155,12 +164,15 @@ export class CatalogImportService {
       }
     }
 
+  this.logger.log(`[CatalogImport] UPSERT COMPLETE providerId=${provider.id} productsCreated=${createdProducts} productsUpdated=${updatedProducts} packagesCreated=${createdPackages} packagesUpdated=${updatedPackages}`);
+
     return {
       createdProducts,
       updatedProducts,
       createdPackages,
       updatedPackages,
       total: external.length,
+  ms: Date.now() - t0,
     };
   }
 
@@ -269,7 +281,9 @@ export class CatalogImportService {
 
   /** يحضر الكتالوج الخارجي ويمرّر cfg إلى السائق — مع فرض tenantId */
   private async fetchExternalCatalog(providerId: string, tenantId: string | null): Promise<ExternalCatalogItem[]> {
-    const provider = await this.resolveProvider(providerId, tenantId);
+  const t0 = Date.now();
+  this.logger.log(`[CatalogImport] fetchExternalCatalog START providerId=${providerId} tenantId=${tenantId || 'null'}`);
+  const provider = await this.resolveProvider(providerId, tenantId);
 
     const cfg = {
       id: (provider as any).id,
@@ -283,11 +297,11 @@ export class CatalogImportService {
 
     const driver = await this.getDriver(providerId, tenantId);
 
-    try {
+  try {
       // 1) الأفضل: fetchCatalog(cfg) إن وُجدت
       if (driver && typeof driver.fetchCatalog === 'function') {
         const rows = await driver.fetchCatalog(cfg);
-        return rows.map((r) => ({
+    const mapped = rows.map((r) => ({
           productExternalId: String(r.productExternalId),
           productName: String(r.productName),
           productImageUrl: r.productImageUrl ?? null,
@@ -296,12 +310,14 @@ export class CatalogImportService {
           costPrice: r.costPrice ?? null,
           currencyCode: r.currencyCode ?? null,
         }));
+    this.logger.log(`[CatalogImport] fetchExternalCatalog DONE providerId=${providerId} via=fetchCatalog count=${mapped.length} ms=${Date.now()-t0}`);
+    return mapped;
       }
 
       // 2) بديل عام: listProducts(cfg) → تحويل لشكل الكتالوج
       if (driver && typeof driver.listProducts === 'function') {
         const items = await driver.listProducts(cfg);
-        return (items ?? []).map((p: any) => {
+        const mapped = (items ?? []).map((p: any) => {
           const meta = p?.meta ?? {};
           const productExternalId =
             (meta.oyun_bilgi_id && String(meta.oyun_bilgi_id)) ||
@@ -323,10 +339,13 @@ export class CatalogImportService {
             currencyCode: p.currencyCode ?? 'TRY',
           } as ExternalCatalogItem;
         });
+        this.logger.log(`[CatalogImport] fetchExternalCatalog DONE providerId=${providerId} via=listProducts count=${mapped.length} ms=${Date.now()-t0}`);
+        return mapped;
       }
 
       throw new BadRequestException('Provider driver does not expose fetchCatalog/listProducts.');
     } catch (e: any) {
+      this.logger.error(`[CatalogImport] fetchExternalCatalog ERROR providerId=${providerId} ms=${Date.now()-t0} error=${e?.message || e}`);
       throw new BadRequestException(
         `Catalog import failed for provider "${(provider as any).name}": ${e?.message ?? e}`,
       );

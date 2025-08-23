@@ -104,8 +104,10 @@ export class BarakatProvider implements ProviderDriver {
   // API methods
   // --------------
   async getBalance(cfg: IntegrationConfig): Promise<{ balance: number }> {
-    const url = `${this.resolveBaseUrl(cfg)}/client/api/profile`;
-    const { data } = await firstValueFrom(this.http.get(url, { headers: this.authHeaders(cfg) }));
+  const url = `${this.resolveBaseUrl(cfg)}/client/api/profile`;
+  const started = Date.now();
+  const { data } = await firstValueFrom(this.http.get(url, { headers: this.authHeaders(cfg), timeout: 15000 }));
+  this.logger.log(`[Barakat] getBalance duration=${Date.now()-started}ms`);
     // مثال الرد: { balance: "43.55", email: "..." }
     const balance =
       typeof data?.balance === 'string' ? parseFloat(data.balance) : Number(data?.balance ?? 0);
@@ -115,7 +117,21 @@ export class BarakatProvider implements ProviderDriver {
 
   async listProducts(cfg: IntegrationConfig): Promise<NormalizedProduct[]> {
     const url = `${this.resolveBaseUrl(cfg)}/client/api/products`;
-    const { data } = await firstValueFrom(this.http.get(url, { headers: this.authHeaders(cfg) }));
+    const started = Date.now();
+    let data: any;
+    try {
+      const resp = await firstValueFrom(this.http.get(url, { headers: this.authHeaders(cfg), timeout: 30000 }));
+      data = resp.data;
+    } catch (e: any) {
+      this.logger.error(`[Barakat] listProducts failed after ${Date.now()-started}ms: ${e?.message || e}`);
+      throw e;
+    }
+    const duration = Date.now() - started;
+    if (!Array.isArray(data)) {
+      this.logger.warn(`[Barakat] listProducts non-array response duration=${duration}ms`);
+      return [];
+    }
+    this.logger.log(`[Barakat] listProducts fetched count=${data.length} duration=${duration}ms`);
 
     if (!Array.isArray(data)) return [];
 

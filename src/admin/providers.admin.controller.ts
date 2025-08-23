@@ -122,6 +122,7 @@ export class ProvidersAdminController {
   async importProviderCatalog(@Req() req: any, @Param('providerId') providerId: string) {
     const role = req.user?.role;
     const tenantId: string | null = req.tenant?.id ?? req.user?.tenantId ?? null;
+  console.log(`[CatalogImport][Controller] START providerId=${providerId} role=${role} tenantId=${tenantId || 'null'}`);
 
     // المطوّر / مالك المنصة: يستورد إلى نطاق dev (بدون tenantId)
     if (role === 'developer' || role === 'instance_owner') {
@@ -129,8 +130,9 @@ export class ProvidersAdminController {
       if (!integ || (integ as any).scope !== 'dev') {
         throw new BadRequestException('Provider must be scope=dev');
       }
-      const res = await this.catalogImport.importProvider(null, providerId);
-      return { ok: true, providerId, scope: 'dev', ...res };
+  const res = await this.catalogImport.importProvider(null, providerId);
+  console.log(`[CatalogImport][Controller] DONE providerId=${providerId} scope=dev ms=${res.ms}`);
+  return { ok: true, providerId, scope: 'dev', ...res };
     }
 
     // مسؤول التينانت: يستورد نسخة من مزوّد المطوّر إلى تينانته
@@ -142,9 +144,11 @@ export class ProvidersAdminController {
       if (!integ || integ.scope !== 'dev') {
         // لو لم يكن dev ربما هو مزود Tenant بالفعل فنستورد مباشرةً في نطاق التينانت
         const res = await this.catalogImport.importProvider(tenantId, providerId);
+        console.log(`[CatalogImport][Controller] DONE providerId=${providerId} scope=tenant-direct ms=${res.ms}`);
         return { ok: true, providerId, scope: 'tenant', ...res };
       }
       const res = await this.catalogImport.importDevProviderIntoTenant(providerId, tenantId);
+      console.log(`[CatalogImport][Controller] DONE providerId=${providerId} scope=tenant-cloned ms=${res.ms}`);
       return { ok: true, providerId, scope: 'tenant', ...res };
     }
 
@@ -160,5 +164,34 @@ export class ProvidersAdminController {
     const tenantId = this.getTenantId(req);
     const items = await this.integrations.list(tenantId, 'tenant');
     return { ok: true, items };
+  }
+
+  /** تشغيل الاستيراد بالخلفية وإرجاع jobId فوري (مبدئي بسيط داخل الذاكرة) */
+  private static pendingJobs: Record<string, any> = {};
+  @Post(':providerId/catalog-import/async')
+  @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER, UserRole.ADMIN)
+  async importProviderCatalogAsync(@Req() req: any, @Param('providerId') providerId: string) {
+    const role = req.user?.role;
+    const tenantId: string | null = req.tenant?.id ?? req.user?.tenantId ?? null;
+    const jobId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    ProvidersAdminController.pendingJobs[jobId] = { status: 'running', startedAt: Date.now() };
+    setImmediate(async () => {
+      try {
+        const res = await this.importProviderCatalog(req, providerId);
+        ProvidersAdminController.pendingJobs[jobId] = { status: 'done', finishedAt: Date.now(), result: res };
+      } catch (e:any) {
+        ProvidersAdminController.pendingJobs[jobId] = { status: 'error', finishedAt: Date.now(), error: e?.message || String(e) };
+      }
+    });
+    return { ok: true, jobId };
+  }
+
+  /** فحص حالة job async */
+  @Get('import-jobs/:jobId')
+  @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER, UserRole.ADMIN)
+  async getImportJob(@Param('jobId') jobId: string) {
+    const j = ProvidersAdminController.pendingJobs[jobId];
+    if (!j) return { ok: false, error: 'job not found' };
+    return { ok: true, job: j };
   }
 }
