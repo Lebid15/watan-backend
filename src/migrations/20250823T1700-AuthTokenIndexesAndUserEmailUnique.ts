@@ -4,8 +4,12 @@ export class AuthTokenIndexesAndUserEmailUnique20250823T1700 implements Migratio
   name = 'AuthTokenIndexesAndUserEmailUnique20250823T1700';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // Additional index to speed up lookups & enforce single-user/type active scanning
-    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_auth_token_user_type" ON "auth_tokens" ("userId", "type")`);
+    // Create index only if auth_tokens table exists
+    await queryRunner.query(`DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='auth_tokens' AND table_schema='public') THEN
+        CREATE INDEX IF NOT EXISTS "idx_auth_token_user_type" ON "auth_tokens" ("userId", "type");
+      END IF;
+    END $$;`);
     // Unique index for (tenantId,email) already declared at entity level; ensure exists (for safety create unique if not existing)
     await queryRunner.query(`DO $$ BEGIN
       IF NOT EXISTS (
