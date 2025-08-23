@@ -114,21 +114,38 @@ export class IntegrationsService {
       where.tenantId = tenantId;
     }
     if (scope) where.scope = scope;
-    return this.integrationRepo.find({ where, order: { createdAt: 'DESC' } as any });
+    try {
+      return this.integrationRepo.find({ where, order: { createdAt: 'DESC' } as any });
+    } catch (e: any) {
+      // إذا العمود scope غير موجود بعد (إصدار قديم في الإنتاج) تجنب 500 وأعد قائمة فارغة برسالة في اللوج
+      if (e?.code === '42703') {
+        console.error('[INTEGRATIONS][LIST] missing column scope -> schema drift. Please run deployment or add column manually.');
+        return [] as any;
+      }
+      throw e;
+    }
   }
 
   async get(id: string, tenantId: string | null) {
     const where: any = { id };
-    if (tenantId === null) {
-      // محاولة أولى كـ dev
-      const dev = await this.integrationRepo.findOne({ where: { id, tenantId: DEV_GLOBAL_TENANT_ID } as any });
-      if (dev) return dev;
-    } else {
-      where.tenantId = tenantId;
+    try {
+      if (tenantId === null) {
+        // محاولة أولى كـ dev
+        const dev = await this.integrationRepo.findOne({ where: { id, tenantId: DEV_GLOBAL_TENANT_ID } as any });
+        if (dev) return dev;
+      } else {
+        where.tenantId = tenantId;
+      }
+      const cfg = await this.integrationRepo.findOne({ where });
+      if (!cfg) throw new NotFoundException('Integration not found');
+      return cfg;
+    } catch (e: any) {
+      if (e?.code === '42703') {
+        console.error('[INTEGRATIONS][GET] missing column scope -> schema drift');
+        throw new NotFoundException('Integration not available (schema upgrade required)');
+      }
+      throw e;
     }
-    const cfg = await this.integrationRepo.findOne({ where });
-    if (!cfg) throw new NotFoundException('Integration not found');
-    return cfg;
   }
 
   private driverOf(cfg: Integration) {
