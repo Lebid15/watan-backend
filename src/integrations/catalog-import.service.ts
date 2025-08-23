@@ -66,10 +66,11 @@ export class CatalogImportService {
       byProductExtId.set(row.productExternalId, list);
     }
 
-    let createdProducts = 0;
-    let updatedProducts = 0;
-    let createdPackages = 0;
-    let updatedPackages = 0;
+  let createdProducts = 0;
+  let updatedProducts = 0;
+  let createdPackages = 0;
+  let updatedPackages = 0;
+  let processedProducts = 0; // إجمالي المنتجات المعالجة (حتى لو لم تُحدّث)
 
     // الموجود مسبقًا لنفس المزود ونفس المستأجر
     const existingProducts = await this.catalogProducts.find({
@@ -82,9 +83,8 @@ export class CatalogImportService {
     // ===== المنتجات =====
     for (const [productExternalId, rows] of byProductExtId.entries()) {
       const first = rows[0];
-      const loopIndex = createdProducts + updatedProducts + 1;
-      if (loopIndex % 25 === 1) {
-        this.logger.log(`[CatalogImport] progress productsProcessed=${loopIndex-1} / totalProducts=${byProductExtId.size}`);
+      if (processedProducts % 25 === 0) {
+        this.logger.log(`[CatalogImport] progress processedProducts=${processedProducts} / totalUniqueProducts=${byProductExtId.size} created=${createdProducts} updated=${updatedProducts}`);
       }
 
       let product: CatalogProduct;
@@ -162,16 +162,19 @@ export class CatalogImportService {
           }
         }
       }
+      processedProducts++;
     }
 
-  this.logger.log(`[CatalogImport] UPSERT COMPLETE providerId=${provider.id} productsCreated=${createdProducts} productsUpdated=${updatedProducts} packagesCreated=${createdPackages} packagesUpdated=${updatedPackages}`);
+    this.logger.log(`[CatalogImport] UPSERT COMPLETE providerId=${provider.id} uniqueProducts=${byProductExtId.size} processedProducts=${processedProducts} productsCreated=${createdProducts} productsUpdated=${updatedProducts} packagesCreated=${createdPackages} packagesUpdated=${updatedPackages}`);
 
     return {
       createdProducts,
       updatedProducts,
       createdPackages,
       updatedPackages,
-      total: external.length,
+  total: external.length,
+  uniqueProducts: byProductExtId.size,
+  processedProducts,
   ms: Date.now() - t0,
     };
   }
