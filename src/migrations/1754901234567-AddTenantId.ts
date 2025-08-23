@@ -22,10 +22,17 @@ export class AddTenantId1754901234567 implements MigrationInterface {
     // SELECT count(*) FROM "product_orders" WHERE "tenantId" IS NULL;
 
     // 3) فرض NOT NULL
-    await queryRunner.query(`
-      ALTER TABLE "product_orders"
-      ALTER COLUMN "tenantId" SET NOT NULL
-    `);
+    // نحاول فرض NOT NULL فقط إذا لا توجد صفوف NULL، وإلا نطبع رسالة ونتركه مؤقتاً
+    await queryRunner.query(`DO $$
+    DECLARE v_cnt int;
+    BEGIN
+      SELECT count(*) INTO v_cnt FROM "product_orders" WHERE "tenantId" IS NULL;
+      IF v_cnt = 0 THEN
+        EXECUTE 'ALTER TABLE "product_orders" ALTER COLUMN "tenantId" SET NOT NULL';
+      ELSE
+        RAISE NOTICE '[AddTenantId] Skipping NOT NULL on product_orders.tenantId; still ' || v_cnt || ' null row(s).';
+      END IF;
+    END $$;`);
 
     // 4) فهرس للـ tenantId
     await queryRunner.query(`
