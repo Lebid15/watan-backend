@@ -26,11 +26,12 @@ export class AddTenantId1754901234567 implements MigrationInterface {
     await queryRunner.query(`DO $$
     DECLARE v_cnt int;
     BEGIN
-      SELECT count(*) INTO v_cnt FROM product_orders WHERE tenantId IS NULL;
+      -- Use quoted identifiers because column was created with mixed case "tenantId"
+      SELECT count(*) INTO v_cnt FROM "product_orders" WHERE "tenantId" IS NULL;
       IF v_cnt = 0 THEN
-        EXECUTE 'ALTER TABLE product_orders ALTER COLUMN tenantId SET NOT NULL';
+        EXECUTE 'ALTER TABLE "product_orders" ALTER COLUMN "tenantId" SET NOT NULL';
       ELSE
-        RAISE NOTICE '[AddTenantId] Skipping NOT NULL on product_orders.tenantId; still % null row(s).', v_cnt;
+        RAISE NOTICE '[AddTenantId] Skipping NOT NULL on product_orders."tenantId"; still % null row(s).', v_cnt;
       END IF;
     END $$;`);
 
