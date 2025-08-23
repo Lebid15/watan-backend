@@ -240,6 +240,49 @@ async function bootstrap() {
         BEGIN
           CREATE UNIQUE INDEX IF NOT EXISTS "uniq_currencies_tenant_code" ON "currencies" ("tenantId","code");
         EXCEPTION WHEN others THEN NULL; END;
+        -- ====== جداول الكتالوج (قد تكون غير منشأة) ======
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.tables WHERE table_name='catalog_product'
+        ) THEN
+          CREATE TABLE "catalog_product" (
+            "id" uuid PRIMARY KEY,
+            "tenantId" uuid NOT NULL,
+            "name" varchar(200) NOT NULL,
+            "description" text NULL,
+            "imageUrl" varchar(500) NULL,
+            "sourceType" varchar(20) NOT NULL DEFAULT 'external',
+            "sourceProviderId" uuid NULL,
+            "externalProductId" varchar(120) NULL,
+            "isActive" boolean NOT NULL DEFAULT true,
+            "createdAt" timestamptz NOT NULL DEFAULT now(),
+            "updatedAt" timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE INDEX IF NOT EXISTS "idx_catalog_product_tenant" ON "catalog_product" ("tenantId");
+          CREATE INDEX IF NOT EXISTS "idx_catalog_product_name" ON "catalog_product" ("name");
+          CREATE INDEX IF NOT EXISTS "idx_catalog_product_external" ON "catalog_product" ("externalProductId");
+          RAISE NOTICE 'Created table catalog_product';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.tables WHERE table_name='catalog_package'
+        ) THEN
+          CREATE TABLE "catalog_package" (
+            "id" uuid PRIMARY KEY,
+            "tenantId" uuid NOT NULL,
+            "catalogProductId" uuid NOT NULL REFERENCES "catalog_product"("id") ON DELETE CASCADE,
+            "name" varchar(200) NOT NULL,
+            "publicCode" varchar(120) NOT NULL,
+            "sourceProviderId" uuid NULL,
+            "externalPackageId" varchar(120) NULL,
+            "costPrice" numeric(18,6) NULL,
+            "currencyCode" varchar(10) NULL,
+            "isActive" boolean NOT NULL DEFAULT true,
+            "createdAt" timestamptz NOT NULL DEFAULT now(),
+            "updatedAt" timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS "ux_catalog_package_tenant_publicCode" ON "catalog_package" ("tenantId","publicCode");
+          CREATE INDEX IF NOT EXISTS "idx_catalog_package_tenant_provider_ext" ON "catalog_package" ("tenantId","sourceProviderId","externalPackageId");
+          RAISE NOTICE 'Created table catalog_package';
+        END IF;
       END$$;
     `);
     const [usersHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'`);
