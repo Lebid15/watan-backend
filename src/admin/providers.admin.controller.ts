@@ -15,7 +15,7 @@ import { UserRole } from '../auth/user-role.enum';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { CatalogImportService } from '../integrations/catalog-import.service';
-import { IntegrationsService } from '../integrations/integrations.service';
+import { IntegrationsService, DEV_GLOBAL_TENANT_ID } from '../integrations/integrations.service';
 import { CreateIntegrationDto } from '../integrations/dto/create-integration.dto';
 import { UpdateIntegrationDto } from '../integrations/dto/update-integration.dto';
 
@@ -44,7 +44,7 @@ export class ProvidersAdminController {
   @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
   async createDevProvider(@Req() _req: any, @Body() dto: CreateIntegrationDto) {
     // الآن service يحوّل tenantId إلى معرف ثابت داخلي عند scope=dev
-    const item = await this.integrations.create('ignored-dev', { ...dto, scope: 'dev' } as any);
+  const item = await this.integrations.create(DEV_GLOBAL_TENANT_ID, { ...dto, scope: 'dev' } as any);
     return { ok: true, item };
   }
 
