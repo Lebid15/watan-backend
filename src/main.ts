@@ -207,6 +207,15 @@ async function bootstrap() {
           ALTER TABLE "integrations" ADD COLUMN "scope" varchar(10) NOT NULL DEFAULT 'tenant';
           RAISE NOTICE 'Added integrations.scope column';
         END IF;
+        -- تأكد من وجود العمود tenantId لو كان الجدول قديماً بلا هذا العمود (الخطأ الحالي يشير لغيابه)
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='integrations' AND column_name='tenantId'
+        ) THEN
+          ALTER TABLE "integrations" ADD COLUMN "tenantId" uuid NULL; -- مبدئياً NULL
+          UPDATE "integrations" SET "tenantId" = '00000000-0000-0000-0000-000000000000' WHERE "tenantId" IS NULL; -- عيّن قيمة ثابتة لأي صف موجود
+          ALTER TABLE "integrations" ALTER COLUMN "tenantId" SET NOT NULL;
+          RAISE NOTICE 'Added integrations.tenantId column and backfilled';
+        END IF;
         -- الفهارس في حال أنشئ الجدول سابقاً بدونها
         BEGIN
           CREATE UNIQUE INDEX IF NOT EXISTS "ux_integrations_tenant_name" ON "integrations" ("tenantId","name");
