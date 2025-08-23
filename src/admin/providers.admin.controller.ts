@@ -49,8 +49,18 @@ export class ProvidersAdminController {
       console.log('[DEV-PROVIDER][CREATE] created id=', (item as any)?.id);
       return { ok: true, item };
     } catch (e:any) {
+      // Unique violation (duplicate name for same tenant/scope)
+      if (e?.code === '23505') {
+        console.error('[DEV-PROVIDER][CREATE] duplicate name', e?.detail);
+        throw new BadRequestException('Provider name already exists');
+      }
+      // Missing column (old production schema) -> يعاد المحاولة برسالة أوضح
+      if (e?.code === '42703') {
+        console.error('[DEV-PROVIDER][CREATE] missing column (schema drift)', e?.message);
+        throw new BadRequestException('Database schema needs refresh: missing column. Reload backend and retry.');
+      }
       console.error('[DEV-PROVIDER][CREATE] failed', e?.code, e?.message);
-      throw e;
+      throw new BadRequestException('Failed to create provider: ' + (e?.message || 'unknown error'));
     }
   }
 

@@ -200,6 +200,23 @@ async function bootstrap() {
           CREATE INDEX IF NOT EXISTS "idx_integrations_scope" ON "integrations" ("scope");
           RAISE NOTICE 'Created table integrations';
         END IF;
+        -- تأكد من وجود العمود scope لو كان الجدول قديماً بلا هذا العمود (يتسبب بخطأ 42703)
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='integrations' AND column_name='scope'
+        ) THEN
+          ALTER TABLE "integrations" ADD COLUMN "scope" varchar(10) NOT NULL DEFAULT 'tenant';
+          RAISE NOTICE 'Added integrations.scope column';
+        END IF;
+        -- الفهارس في حال أنشئ الجدول سابقاً بدونها
+        BEGIN
+          CREATE UNIQUE INDEX IF NOT EXISTS "ux_integrations_tenant_name" ON "integrations" ("tenantId","name");
+        EXCEPTION WHEN others THEN NULL; END;
+        BEGIN
+          CREATE INDEX IF NOT EXISTS "idx_integrations_provider" ON "integrations" ("provider");
+        EXCEPTION WHEN others THEN NULL; END;
+        BEGIN
+          CREATE INDEX IF NOT EXISTS "idx_integrations_scope" ON "integrations" ("scope");
+        EXCEPTION WHEN others THEN NULL; END;
         -- currencies.tenantId (اكتشفنا خطأ 42703 لعدم وجود العمود في الإنتاج)
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns WHERE table_name='currencies' AND column_name='tenantId'
