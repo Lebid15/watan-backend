@@ -179,6 +179,27 @@ async function bootstrap() {
           ALTER TABLE "order_dispatch_logs" ADD COLUMN "tenantId" uuid NULL;
           RAISE NOTICE 'Added order_dispatch_logs.tenantId';
         END IF;
+        -- ====== integrations (قد تكون مفقودة في الإنتاج) ======
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.tables WHERE table_name='integrations'
+        ) THEN
+          CREATE TABLE "integrations" (
+            "id" uuid PRIMARY KEY,
+            "tenantId" uuid NOT NULL,
+            "name" varchar(120) NOT NULL,
+            "provider" varchar(20) NOT NULL,
+            "scope" varchar(10) NOT NULL DEFAULT 'tenant',
+            "baseUrl" varchar(255) NULL,
+            "apiToken" varchar(255) NULL,
+            "kod" varchar(120) NULL,
+            "sifre" varchar(120) NULL,
+            "createdAt" timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS "ux_integrations_tenant_name" ON "integrations" ("tenantId","name");
+          CREATE INDEX IF NOT EXISTS "idx_integrations_provider" ON "integrations" ("provider");
+          CREATE INDEX IF NOT EXISTS "idx_integrations_scope" ON "integrations" ("scope");
+          RAISE NOTICE 'Created table integrations';
+        END IF;
         -- currencies.tenantId (اكتشفنا خطأ 42703 لعدم وجود العمود في الإنتاج)
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns WHERE table_name='currencies' AND column_name='tenantId'

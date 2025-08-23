@@ -43,9 +43,15 @@ export class ProvidersAdminController {
   @Post('dev')
   @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
   async createDevProvider(@Req() _req: any, @Body() dto: CreateIntegrationDto) {
-    // الآن service يحوّل tenantId إلى معرف ثابت داخلي عند scope=dev
-  const item = await this.integrations.create(DEV_GLOBAL_TENANT_ID, { ...dto, scope: 'dev' } as any);
-    return { ok: true, item };
+    try {
+      console.log('[DEV-PROVIDER][CREATE] incoming dto=', dto);
+      const item = await this.integrations.create(DEV_GLOBAL_TENANT_ID, { ...dto, scope: 'dev' } as any);
+      console.log('[DEV-PROVIDER][CREATE] created id=', (item as any)?.id);
+      return { ok: true, item };
+    } catch (e:any) {
+      console.error('[DEV-PROVIDER][CREATE] failed', e?.code, e?.message);
+      throw e;
+    }
   }
 
   /** قائمة مزوّدي المطوّر فقط */
