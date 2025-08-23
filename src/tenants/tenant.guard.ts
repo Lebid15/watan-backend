@@ -29,6 +29,10 @@ const NO_TENANT_REQUIRED_PATHS: RegExp[] = [
   // Global catalog (developer scope) listing endpoints — read-only, still protected by JwtAuth + Roles(dev/instance_owner)
   /^\/api\/admin\/catalog\/products(\/|$)/, // list products, also covers /products/:id/packages because narrower regex added below
   /^\/api\/admin\/catalog\/products\/[^/]+\/packages$/,
+  // Global tenant management (developers / instance_owner need to bootstrap tenants without impersonation)
+  /^\/api\/admin\/tenants(\/|$)/,
+  // Global stats (developer / instance owner overview)
+  /^\/api\/admin\/stats(\/|$)/,
 ];
 
 @Injectable()

@@ -7,9 +7,10 @@ import { CreateTenantDto } from './dto/create-tenant.dto';
 import { UpdateTenantDto } from './dto/update-tenant.dto';
 import { AddDomainDto } from './dto/add-domain.dto';
 import { PatchDomainDto } from './dto/patch-domain.dto';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
-@UseGuards(RolesGuard)
-@Roles(UserRole.ADMIN)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.ADMIN, UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
 // لا نضع "api/" هنا لأننا نستخدم setGlobalPrefix('api') في main.ts
 @Controller('admin/tenants')
 export class TenantsAdminController {
