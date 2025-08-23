@@ -260,18 +260,30 @@ export class UserService {
   }
 
   async getProfileWithCurrency(userId: string, tenantId?: string | null) {
-    let user = await this.usersRepository.findOne({ where: { id: userId, tenantId } as any, relations: ['currency'] });
+    console.log('[PROFILE][SIMPLIFIED] start', { userId, tenantId });
+    // نجلب المستخدم بدون أي علاقات لتفادي أخطاء JOIN
+    let user = await this.usersRepository.findOne({ where: { id: userId, tenantId } as any });
     if (!user && (tenantId === undefined || tenantId === null)) {
-      // محاولة الحصول على مستخدم عالمي (tenantId IS NULL)
-      user = await this.usersRepository.findOne({ where: { id: userId, tenantId: null } as any, relations: ['currency'] });
+      user = await this.usersRepository.findOne({ where: { id: userId, tenantId: null } as any });
     }
     if (!user) throw new NotFoundException('المستخدم غير موجود');
+
+    let currencyCode = 'USD';
+    if ((user as any).currency_id) {
+      try {
+        const cur = await this.currenciesRepository.findOne({ where: { id: (user as any).currency_id } as any });
+        if (cur?.code) currencyCode = cur.code;
+      } catch (e:any) {
+        console.warn('[PROFILE] currency lookup failed – fallback USD:', e?.code || e?.message);
+      }
+    }
+    console.log('[PROFILE][SIMPLIFIED] success', { id: user.id, email: user.email, currencyCode });
     return {
       id: user.id,
       email: user.email,
       fullName: user.fullName,
       balance: Number(user.balance),
-      currencyCode: user.currency?.code ?? 'USD',
+      currencyCode,
     };
   }
 

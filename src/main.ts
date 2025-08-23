@@ -179,6 +179,20 @@ async function bootstrap() {
           ALTER TABLE "order_dispatch_logs" ADD COLUMN "tenantId" uuid NULL;
           RAISE NOTICE 'Added order_dispatch_logs.tenantId';
         END IF;
+        -- currencies.tenantId (اكتشفنا خطأ 42703 لعدم وجود العمود في الإنتاج)
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='currencies' AND column_name='tenantId'
+        ) THEN
+          ALTER TABLE "currencies" ADD COLUMN "tenantId" uuid NULL;
+          RAISE NOTICE 'Added currencies.tenantId (NULLable for legacy rows)';
+        END IF;
+        -- فهرس وفريدة مركبة لو لم تكن موجودة (قد تفشل لو موجودة فنلتقط لاحقاً)
+        BEGIN
+          CREATE INDEX IF NOT EXISTS "idx_currencies_tenant" ON "currencies" ("tenantId");
+        EXCEPTION WHEN others THEN NULL; END;
+        BEGIN
+          CREATE UNIQUE INDEX IF NOT EXISTS "uniq_currencies_tenant_code" ON "currencies" ("tenantId","code");
+        EXCEPTION WHEN others THEN NULL; END;
       END$$;
     `);
     const [usersHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'`);
