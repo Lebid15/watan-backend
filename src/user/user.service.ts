@@ -3,6 +3,7 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, FindOptionsWhere, IsNull } from 'typeorm';
 import * as bcrypt from 'bcrypt';
+import * as argon2 from 'argon2';
 
 import { User } from './user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -35,7 +36,7 @@ export class UserService {
       throw new BadRequestException('Invalid or inactive currency');
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+  const hashedPassword = await argon2.hash(password, { type: argon2.argon2id });
     const user = this.usersRepository.create({
       email,
       password: hashedPassword,
@@ -243,7 +244,7 @@ export class UserService {
     }
     const user = await this.usersRepository.findOne({ where: { id: userId, tenantId } });
     if (!user) throw new NotFoundException('User not found');
-    user.password = await bcrypt.hash(newPassword, 10);
+  user.password = await argon2.hash(newPassword, { type: argon2.argon2id });
     await this.usersRepository.save(user);
     return { ok: true };
   }
@@ -305,8 +306,7 @@ export class UserService {
       throw new BadRequestException('Password too short');
     }
 
-    const salt = await bcrypt.genSalt(10);
-    user.password = await bcrypt.hash(plain, salt);
+  user.password = await argon2.hash(plain, { type: argon2.argon2id });
 
     await this.usersRepository.save(user);
     return { ok: true };

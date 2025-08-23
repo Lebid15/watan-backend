@@ -10,6 +10,7 @@ import { JwtStrategy } from './jwt.strategy';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Tenant } from '../tenants/tenant.entity';
 import { User } from '../user/user.entity';
+import { PasskeysModule } from './passkeys/passkeys.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { User } from '../user/user.entity';
       secret: jwtConstants.secret,
       signOptions: { expiresIn: '1d' },
     }),
+    PasskeysModule,
   ],
   providers: [AuthService, JwtStrategy],
   controllers: [AuthController],

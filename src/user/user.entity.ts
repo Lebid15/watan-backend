@@ -16,6 +16,7 @@ import { Tenant } from '../tenants/tenant.entity';
 @Entity('users')
 @Index('idx_users_tenant', ['tenantId'])
 @Index('uniq_users_tenant_email', ['tenantId', 'email'], { unique: true })
+@Index('uniq_users_tenant_username', ['tenantId', 'username'], { unique: true })
 export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;

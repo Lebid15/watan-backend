@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
 import { ScheduleModule } from '@nestjs/schedule';
+import { APP_GUARD } from '@nestjs/core';
 
 import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
@@ -14,10 +15,13 @@ import { IntegrationsModule } from './integrations/integrations.module';
 import { PaymentsModule } from './payments/payments.module';
 import { CodesModule } from './codes/codes.module';
 import { TenantsModule } from './tenants/tenants.module';
+import { AuditModule } from './audit/audit.module';
 
 import { Tenant } from './tenants/tenant.entity';
 import { TenantDomain } from './tenants/tenant-domain.entity';
 import { TenantContextMiddleware } from './tenants/tenant-context.middleware';
+import { HealthController } from './health/health.controller';
+import { TenantGuard } from './tenants/tenant.guard';
 
 @Module({
   imports: [
@@ -61,7 +65,12 @@ import { TenantContextMiddleware } from './tenants/tenant-context.middleware';
     IntegrationsModule,
     CodesModule,
     TenantsModule,
+    AuditModule,
     TypeOrmModule.forFeature([Tenant, TenantDomain]),
+  ],
+  controllers: [HealthController],
+  providers: [
+    { provide: APP_GUARD, useClass: TenantGuard },
   ],
 })
 export class AppModule implements NestModule {

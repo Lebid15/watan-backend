@@ -22,26 +22,27 @@ export class TenantContextMiddleware implements NestMiddleware {
     const originalHost = req.headers.host;
     const tenantHost = req.headers['x-tenant-host'] || originalHost;
     const host = (tenantHost || '').split(':')[0]; // ex: kadro.localhost
-    
-    console.log('[MIDDLEWARE] Host:', originalHost, 'X-Tenant-Host:', req.headers['x-tenant-host'], 'Final:', host, 'URL:', req.url);
-    
-    if (!host) return next();
 
-    // ابحث عن النطاق في tenant_domains
-    const domain = await this.domains.findOne({ where: { domain: host } });
-    console.log('[MIDDLEWARE] Domain found:', domain ? domain.domain : 'NULL');
-    
-    if (!domain) return next(); // أو يمكنك رمي NotFoundException
-
-    const tenant = await this.tenants.findOne({ where: { id: domain.tenantId } });
-    console.log('[MIDDLEWARE] Tenant found:', tenant ? tenant.name : 'NULL');
-    
-    if (!tenant || !tenant.isActive) {
-      throw new NotFoundException('Tenant not found or inactive');
+  let tenant: Tenant | null = null;
+    if (host) {
+      const domain = await this.domains.findOne({ where: { domain: host } });
+      if (domain) {
+        tenant = await this.tenants.findOne({ where: { id: domain.tenantId } });
+      }
     }
 
-    req.tenant = tenant;
-    console.log('[MIDDLEWARE] Set tenant:', tenant.name, 'for request');
+    // Fallback: explicit X-Tenant-Id header (integrations)
+    if (!tenant) {
+      const headerId = (req.headers['x-tenant-id'] as string) || (req.headers['X-Tenant-Id'] as string);
+      if (headerId && /^[0-9a-fA-F-]{10,}$/.test(headerId)) {
+        tenant = await this.tenants.findOne({ where: { id: headerId } });
+      }
+    }
+
+    if (tenant) {
+      if (!(tenant as any).isActive) throw new NotFoundException('Tenant inactive');
+      req.tenant = tenant;
+    }
     next();
   }
 }

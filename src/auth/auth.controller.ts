@@ -1,14 +1,16 @@
 // src/auth/auth.controller.ts
-import { Controller, Post, Body, BadRequestException, UnauthorizedException, UseGuards, Req, ForbiddenException, ConflictException } from '@nestjs/common';
+import { Controller, Post, Body, BadRequestException, UnauthorizedException, UseGuards, Req, ForbiddenException, ConflictException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
 import { Tenant } from '../tenants/tenant.entity';
 import { User } from '../user/user.entity';
+// ...existing code...
 import * as bcrypt from 'bcrypt';
 import { ApiTags, ApiBody, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { CreateUserDto } from '../user/dto/create-user.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
+// (imports already declared above for repositories)
 import type { Request } from 'express';
 
 class LoginDto {
@@ -30,7 +32,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     @InjectRepository(Tenant) private readonly tenantsRepo: Repository<Tenant>,
-  @InjectRepository(User) private readonly usersRepo: Repository<User>,
+    @InjectRepository(User) private readonly usersRepo: Repository<User>,
   ) {}
 
   @Post('login')
@@ -128,5 +130,21 @@ export class AuthController {
     );
 
     return { ok: true };
+  }
+
+  // ================= Impersonation (assume-tenant) =================
+  @Post('assume-tenant')
+  @UseGuards(JwtAuthGuard)
+  async assumeTenant(@Req() req: any, @Body() body: { tenantId: string }) {
+    const user = req.user;
+    if (!user) throw new UnauthorizedException();
+    if (!body?.tenantId) throw new BadRequestException('tenantId required');
+    if (!(user.role === 'developer' || user.role === 'instance_owner')) {
+      throw new ForbiddenException('Only elevated roles can impersonate');
+    }
+    const tenant = await this.tenantsRepo.findOne({ where: { id: body.tenantId } });
+    if (!tenant || !tenant.isActive) throw new NotFoundException('Tenant not found');
+    const token = await this.authService.issueImpersonationToken(user, tenant.id);
+    return { token, tenantId: tenant.id, impersonated: true, expiresIn: 1800 };
   }
 }

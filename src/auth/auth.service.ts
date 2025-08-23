@@ -2,6 +2,7 @@
 import { Injectable, UnauthorizedException, ConflictException, NotFoundException } from '@nestjs/common';
 import { UserService } from '../user/user.service';
 import * as bcrypt from 'bcrypt';
+import * as argon2 from 'argon2';
 import { JwtService } from '@nestjs/jwt';
 import { CreateUserDto } from '../user/dto/create-user.dto';
 import { User } from '../user/user.entity';
@@ -36,8 +37,22 @@ export class AuthService {
 
     if (!user) return null;
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    console.log('[AUTH] password match?', isMatch, 'role=', user.role, 'tenantId=', user.tenantId ?? null);
+    let isMatch = false;
+    const hash = user.password;
+    if (hash.startsWith('$argon2')) {
+      try { isMatch = await argon2.verify(hash, password); } catch {}
+    } else {
+      // assume bcrypt legacy
+      try { isMatch = await bcrypt.compare(password, hash); } catch {}
+      // migrate to argon2 on success
+      if (isMatch) {
+        try {
+          await this.userService.setPassword(user.id, password, user.tenantId ?? null as any); // will hash with argon2
+          console.log('[AUTH] migrated bcrypt -> argon2 for user', user.id);
+        } catch (e) { console.warn('[AUTH] rehash failed', (e as any)?.message); }
+      }
+    }
+    console.log('[AUTH] password match?', isMatch, 'algo=', hash.startsWith('$argon2') ? 'argon2' : 'bcrypt', 'role=', user.role, 'tenantId=', user.tenantId ?? null);
     if (!isMatch) return null;
 
     const { password: _omitted, ...result } = user;
@@ -68,6 +83,18 @@ export class AuthService {
         tenantId: effectiveTenantId,
       },
     };
+  }
+
+  async issueImpersonationToken(user: any, tenantId: string) {
+    const payload = {
+      email: user.email,
+      sub: user.id,
+      role: user.role ?? 'user',
+      tenantId,
+      impersonated: true,
+    };
+    // 30m TTL
+    return this.jwtService.sign(payload, { expiresIn: '30m' });
   }
 
   async register(dto: CreateUserDto, tenantId: string) {
