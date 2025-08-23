@@ -8,6 +8,9 @@ import { User } from '../user/user.entity';
 import * as bcrypt from 'bcrypt';
 import { ApiTags, ApiBody, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
+import { AuthTokenService } from './auth-token.service';
+import { AuditService } from '../audit/audit.service';
+import { RateLimit } from '../common/rate-limit.guard';
 import { CreateUserDto } from '../user/dto/create-user.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
 // (imports already declared above for repositories)
@@ -33,6 +36,8 @@ export class AuthController {
     private readonly authService: AuthService,
     @InjectRepository(Tenant) private readonly tenantsRepo: Repository<Tenant>,
     @InjectRepository(User) private readonly usersRepo: Repository<User>,
+  private tokens: AuthTokenService,
+  private audit: AuditService,
   ) {}
 
   @Post('login')
@@ -140,11 +145,99 @@ export class AuthController {
     if (!user) throw new UnauthorizedException();
     if (!body?.tenantId) throw new BadRequestException('tenantId required');
     if (!(user.role === 'developer' || user.role === 'instance_owner')) {
+      try { await this.audit.log('impersonation_denied', { actorUserId: user.id, meta: { tenantId: body.tenantId, reason: 'role_not_allowed' } }); } catch {}
       throw new ForbiddenException('Only elevated roles can impersonate');
     }
     const tenant = await this.tenantsRepo.findOne({ where: { id: body.tenantId } });
     if (!tenant || !tenant.isActive) throw new NotFoundException('Tenant not found');
     const token = await this.authService.issueImpersonationToken(user, tenant.id);
+    try { await this.audit.log('impersonation_success', { actorUserId: user.id, targetTenantId: tenant.id }); } catch {}
     return { token, tenantId: tenant.id, impersonated: true, expiresIn: 1800 };
+  }
+
+  // ================= Email Verification =================
+  @Post('request-email-verification')
+  @UseGuards(JwtAuthGuard)
+  @RateLimit({ windowMs: 10*60*1000, max: 5, id: 'emailverify' })
+  async requestEmailVerification(@Req() req: any) {
+    const userId = req.user.sub;
+    const user = await this.usersRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+    if (user.emailVerified) return { ok: true, already: true };
+    const { raw, entity } = await this.tokens.create(user.id, user.tenantId ?? null, 'email_verify', 24*60*60*1000);
+    // Simulate sending email by logging token (would integrate with real email service)
+    console.log('[EMAIL][VERIFY] token for user', user.email, raw);
+    try { await this.audit.log('email_verify_request', { actorUserId: user.id, targetUserId: user.id, targetTenantId: user.tenantId ?? null, meta: { tokenId: entity.id } }); } catch {}
+    return { ok: true }; // don't leak token
+  }
+
+  @Post('verify-email')
+  @RateLimit({ windowMs: 10*60*1000, max: 20, id: 'verifyemail' })
+  async verifyEmail(@Body() body: { token: string }) {
+    if (!body?.token) throw new BadRequestException('token required');
+    const token = await this.tokens.consume(body.token, 'email_verify');
+    if (!token) {
+      try { await this.audit.log('email_verify_fail', { meta: { reason: 'invalid_or_expired' } }); } catch {}
+      throw new BadRequestException('Invalid token');
+    }
+    const user = await this.usersRepo.findOne({ where: { id: token.userId } });
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.emailVerified) {
+      user.emailVerified = true;
+      user.emailVerifiedAt = new Date();
+      await this.usersRepo.save(user);
+    }
+    try { await this.audit.log('email_verify_success', { actorUserId: user.id, targetUserId: user.id, targetTenantId: user.tenantId ?? null }); } catch {}
+    return { ok: true };
+  }
+
+  // ================= Password Reset =================
+  @Post('request-password-reset')
+  @RateLimit({ windowMs: 10*60*1000, max: 5, id: 'pwdresetreq' })
+  async requestPasswordReset(@Body() body: { emailOrUsername: string; tenantCode?: string }) {
+    if (!body?.emailOrUsername) throw new BadRequestException('emailOrUsername required');
+    let tenantId: string | null = null;
+    if (body.tenantCode) {
+      const t = await this.tenantsRepo.findOne({ where: { code: body.tenantCode } });
+      if (t) tenantId = t.id;
+    }
+    // Find user (tenant-specific first, then owner if tenantId null)
+    let user: User | null = null;
+    if (tenantId) {
+      user = await this.usersRepo.findOne({ where: { email: body.emailOrUsername, tenantId } as any })
+        || await this.usersRepo.findOne({ where: { username: body.emailOrUsername, tenantId } as any });
+    }
+    if (!user) {
+      user = await this.usersRepo.findOne({ where: { email: body.emailOrUsername, tenantId: IsNull() } as any })
+        || await this.usersRepo.findOne({ where: { username: body.emailOrUsername, tenantId: IsNull() } as any });
+    }
+    if (user) {
+      const { raw, entity } = await this.tokens.create(user.id, user.tenantId ?? null, 'password_reset', 60*60*1000);
+      console.log('[EMAIL][PWDRESET] token for user', user.email, raw);
+      try { await this.audit.log('password_reset_request', { actorUserId: user.id, targetUserId: user.id, targetTenantId: user.tenantId ?? null, meta: { tokenId: entity.id } }); } catch {}
+    }
+    // Always return success to avoid user enumeration
+    return { ok: true };
+  }
+
+  @Post('reset-password')
+  @RateLimit({ windowMs: 10*60*1000, max: 10, id: 'pwdreset' })
+  async resetPassword(@Body() body: { token: string; newPassword: string }) {
+    if (!body?.token || !body?.newPassword) throw new BadRequestException('token & newPassword required');
+    if (body.newPassword.length < 6) throw new BadRequestException('weak password');
+    const token = await this.tokens.consume(body.token, 'password_reset');
+    if (!token) {
+      try { await this.audit.log('password_reset_fail', { meta: { reason: 'invalid_or_expired' } }); } catch {}
+      throw new BadRequestException('Invalid token');
+    }
+    const user = await this.usersRepo.findOne({ where: { id: token.userId } });
+    if (!user) throw new NotFoundException('User not found');
+    // Reuse user service setPassword path would need tenant; just update directly with argon2 via userService? Simpler direct hash done in UserService; replicate minimal logic.
+    // For consistency we mark password change via direct query to avoid more imports.
+    const argon2 = require('argon2');
+    user.password = await argon2.hash(body.newPassword, { type: argon2.argon2id });
+    await this.usersRepo.save(user);
+    try { await this.audit.log('password_reset_success', { actorUserId: user.id, targetUserId: user.id, targetTenantId: user.tenantId ?? null }); } catch {}
+    return { ok: true };
   }
 }

@@ -8,6 +8,7 @@ import { APP_GUARD } from '@nestjs/core';
 
 import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
+import { PasskeysModule } from './auth/passkeys/passkeys.module';
 import { AdminModule } from './admin/admin.module';
 import { ProductsModule } from './products/products.module';
 import { CurrenciesModule } from './currencies/currencies.module';
@@ -22,6 +23,7 @@ import { TenantDomain } from './tenants/tenant-domain.entity';
 import { TenantContextMiddleware } from './tenants/tenant-context.middleware';
 import { HealthController } from './health/health.controller';
 import { TenantGuard } from './tenants/tenant.guard';
+import { RateLimiterRegistry, RateLimitGuard } from './common/rate-limit.guard';
 
 @Module({
   imports: [
@@ -58,6 +60,7 @@ import { TenantGuard } from './tenants/tenant.guard';
     ScheduleModule.forRoot(),
     UserModule,
     AuthModule,
+  PasskeysModule,
     AdminModule,
     ProductsModule,
     CurrenciesModule,
@@ -71,12 +74,14 @@ import { TenantGuard } from './tenants/tenant.guard';
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useClass: TenantGuard },
+    RateLimiterRegistry,
+    RateLimitGuard,
   ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     consumer
       .apply(TenantContextMiddleware)
-      .forRoutes({ path: '*path', method: RequestMethod.ALL });
+      .forRoutes({ path: '*', method: RequestMethod.ALL });
   }
 }

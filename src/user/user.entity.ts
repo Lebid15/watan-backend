@@ -88,4 +88,7 @@ export class User {
 
   @UpdateDateColumn()
   updatedAt: Date;
+
+  @Column({ type: 'boolean', default: false }) emailVerified: boolean;
+  @Column({ type: 'timestamptz', nullable: true }) emailVerifiedAt?: Date | null;
 }

@@ -7,9 +7,16 @@ const PUBLIC_PATHS: RegExp[] = [
   /^\/api\/ready$/,
   /^\/api\/auth\/login$/,
   /^\/api\/auth\/register$/,
-  /^\/api\/auth\/password\//,
+  /^\/api\/auth\/request-password-reset$/,
+  /^\/api\/auth\/reset-password$/,
+  /^\/api\/auth\/request-email-verification$/,
+  /^\/api\/auth\/verify-email$/,
   /^\/api\/auth\/bootstrap-developer$/,
   /^\/api\/auth\/assume-tenant$/,
+  /^\/api\/auth\/passkeys\/options\/register$/,
+  /^\/api\/auth\/passkeys\/register$/,
+  /^\/api\/auth\/passkeys\/options\/login$/,
+  /^\/api\/auth\/passkeys\/login$/,
   /^\/api\/docs(\/|$)/,
 ];
 

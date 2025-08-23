@@ -48,13 +48,13 @@ export class DepositsService {
     return dep;
   }
 
-  // --------- FX rates (بدون tenantId مؤقتًا) ---------
-  private async getRate(code: string): Promise<number> {
-    const c = await this.currenciesRepo.findOne({ where: { code } as any });
-    if (!c) throw new NotFoundException(`العملة ${code} غير موجودة`);
+  // --------- FX rates (مقيدة بالمستأجر) ---------
+  private async getRate(code: string, tenantId: string): Promise<number> {
+    const c = await this.currenciesRepo.findOne({ where: { code, tenantId } as any });
+    if (!c) throw new NotFoundException(`العملة ${code} غير موجودة ضمن هذا المستأجر`);
     const r: any = (c as any).rate ?? (c as any).value ?? null;
     if (r === null || r === undefined) {
-      throw new BadRequestException(`لا يوجد سعر صرف للعملة ${code}`);
+      throw new BadRequestException(`لا يوجد سعر صرف للعملة ${code} ضمن هذا المستأجر`);
     }
     return Number(r);
   }
@@ -71,8 +71,8 @@ export class DepositsService {
     const originalCurrency = dto.originalCurrency.toUpperCase();
     const walletCurrency = dto.walletCurrency.toUpperCase();
 
-    const rFrom = await this.getRate(originalCurrency);
-    const rTo = await this.getRate(walletCurrency);
+  const rFrom = await this.getRate(originalCurrency, tenantId);
+  const rTo = await this.getRate(walletCurrency, tenantId);
 
     const ratio = rTo / rFrom;
     const convertedAmount = Number(dto.originalAmount) * ratio;

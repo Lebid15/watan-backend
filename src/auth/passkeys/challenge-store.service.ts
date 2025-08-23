@@ -56,6 +56,25 @@ export class PasskeyChallengeStore {
     return stored.challenge;
   }
 
+  // New flow: client sends back only an opaque id (challengeRef). We return stored challenge for verification.
+  async consumeById(id: string, expectedType: 'reg'|'auth', userId?: string): Promise<string | null> {
+    if (!id) return null;
+    let stored: StoredChallenge | null = null;
+    if (this.redis) {
+      const raw = await this.redis.get(this.key(id));
+      if (raw) stored = JSON.parse(raw);
+      if (raw) await this.redis.del(this.key(id));
+    } else {
+      stored = this.memory.get(id) || null;
+      if (stored) this.memory.delete(id);
+    }
+    if (!stored) return null;
+    if (stored.type !== expectedType) return null;
+    if (Date.now() > stored.expiresAt) return null;
+    if (userId && stored.userId && stored.userId !== userId) return null;
+    return stored.challenge;
+  }
+
   private cleanup() {
     const now = Date.now();
     for (const [k,v] of this.memory.entries()) {

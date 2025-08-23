@@ -830,7 +830,7 @@ export class ProductsService {
     };
     const TRY_RATE = getRate('TRY') ?? 1;
 
-    const toTRY = (amount: number, code?: string) => {
+    const toTRY = (amount: number, code?: string, tenantId?: string) => {
       const c = (code || 'TRY').toUpperCase();
       if (c === 'TRY') return amount;
       const r = getRate(c);
