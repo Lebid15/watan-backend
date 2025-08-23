@@ -26,14 +26,23 @@ export class AddTenantColumnsIfMissing20250823T2300 implements MigrationInterfac
       CREATE INDEX IF NOT EXISTS "idx_users_tenant" ON "users" ("tenantId");
     `);
 
-    // مفتاح أجنبي اختياري (لو جدول tenant موجود)
+    // مفتاح أجنبي اختياري (لو جدول tenants موجود) ـ دعم كلا الاسمين احتياطاً
     await queryRunner.query(`
       DO $$
       BEGIN
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint WHERE conname = 'fk_users_tenant'
-        ) AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='tenant') THEN
-          ALTER TABLE "users" ADD CONSTRAINT "fk_users_tenant" FOREIGN KEY ("tenantId") REFERENCES "tenant"(id) ON DELETE CASCADE;
+        ) AND EXISTS (
+          SELECT 1 FROM information_schema.tables WHERE table_name in ('tenants','tenant')
+        ) THEN
+          BEGIN
+            -- إذا وُجد جدول tenants نربط به، وإلا نحاول الجدول المفرد
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='tenants') THEN
+              ALTER TABLE "users" ADD CONSTRAINT "fk_users_tenant" FOREIGN KEY ("tenantId") REFERENCES "tenants"(id) ON DELETE CASCADE;
+            ELSIF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='tenant') THEN
+              ALTER TABLE "users" ADD CONSTRAINT "fk_users_tenant" FOREIGN KEY ("tenantId") REFERENCES "tenant"(id) ON DELETE CASCADE;
+            END IF;
+          EXCEPTION WHEN others THEN NULL; END;
         END IF;
       END$$;
     `);
