@@ -283,6 +283,23 @@ async function bootstrap() {
           CREATE INDEX IF NOT EXISTS "idx_catalog_package_tenant_provider_ext" ON "catalog_package" ("tenantId","sourceProviderId","externalPackageId");
           RAISE NOTICE 'Created table catalog_package';
         END IF;
+        -- في حال كانت الجداول قديمة بلا أعمدة tenantId (يظهر خطأ 42703)
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='catalog_product' AND column_name='tenantId'
+        ) THEN
+          ALTER TABLE "catalog_product" ADD COLUMN "tenantId" uuid NULL; -- مؤقتاً NULL ثم تعبئة
+          UPDATE "catalog_product" SET "tenantId" = '00000000-0000-0000-0000-000000000000' WHERE "tenantId" IS NULL;
+          ALTER TABLE "catalog_product" ALTER COLUMN "tenantId" SET NOT NULL;
+          RAISE NOTICE 'Added catalog_product.tenantId + backfill';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns WHERE table_name='catalog_package' AND column_name='tenantId'
+        ) THEN
+          ALTER TABLE "catalog_package" ADD COLUMN "tenantId" uuid NULL;
+          UPDATE "catalog_package" SET "tenantId" = '00000000-0000-0000-0000-000000000000' WHERE "tenantId" IS NULL;
+          ALTER TABLE "catalog_package" ALTER COLUMN "tenantId" SET NOT NULL;
+          RAISE NOTICE 'Added catalog_package.tenantId + backfill';
+        END IF;
       END$$;
     `);
     const [usersHas] = await dataSource.query(`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name='users' AND column_name='tenantId'`);
