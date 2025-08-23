@@ -20,6 +20,17 @@ const PUBLIC_PATHS: RegExp[] = [
   /^\/api\/docs(\/|$)/,
 ];
 
+// Routes that still require auth/roles (handled at controller) but do NOT require a tenant context.
+// We short‑circuit tenant checks here so developer / instance_owner can manage global dev providers.
+const NO_TENANT_REQUIRED_PATHS: RegExp[] = [
+  /^\/api\/admin\/providers\/dev(\/|$)/, // list/create/diag/update/delete dev providers
+  /^\/api\/admin\/providers\/[^/]+\/catalog-import(\/|$)/, // import catalog for dev provider (global scope)
+  /^\/api\/admin\/providers\/import-jobs\/[^/]+$/, // check async import job status
+  // Global catalog (developer scope) listing endpoints — read-only, still protected by JwtAuth + Roles(dev/instance_owner)
+  /^\/api\/admin\/catalog\/products(\/|$)/, // list products, also covers /products/:id/packages because narrower regex added below
+  /^\/api\/admin\/catalog\/products\/[^/]+\/packages$/,
+];
+
 @Injectable()
 export class TenantGuard implements CanActivate {
   constructor(private reflector: Reflector) {}
@@ -28,7 +39,10 @@ export class TenantGuard implements CanActivate {
     const req: any = context.switchToHttp().getRequest();
     const path = req.path || req.url || '';
 
-    if (PUBLIC_PATHS.some(r => r.test(path))) return true;
+  if (PUBLIC_PATHS.some(r => r.test(path))) return true;
+
+  // Allow certain global-scope admin routes to pass without tenant; JWT & RolesGuard will run after us.
+  if (NO_TENANT_REQUIRED_PATHS.some(r => r.test(path))) return true;
 
     // JWT user injected by auth guard earlier (assume global order: auth -> tenant guard) or manually attached.
     const user = req.user;

@@ -148,7 +148,25 @@ export class UserController {
     const tenantId = req.tenant?.id;
     const userId = req.user.id ?? req.user.sub;
     if (!userId) throw new BadRequestException('User ID is missing in token');
-    return this.userService.getProfileWithCurrency(userId, tenantId);
+    try {
+      return await this.userService.getProfileWithCurrency(userId, tenantId);
+    } catch (e) {
+      // سياسة ملائمة للبيئة التطويرية: لو المستخدم مطوّر أو مالك منصة ولا يوجد تينانت نعيد ملفاً مبسطاً افتراضياً
+      const role = (req.user?.role || '').toLowerCase();
+      const allowsNullTenant = ['developer', 'instance_owner'].includes(role);
+      if (!tenantId && allowsNullTenant) {
+        return {
+          id: userId,
+            email: req.user.email,
+            fullName: req.user.fullName ?? null,
+            balance: 0,
+            currencyCode: 'USD',
+            role,
+            fallback: true,
+        };
+      }
+      throw e;
+    }
   }
 
   @Get(':id')

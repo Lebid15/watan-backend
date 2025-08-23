@@ -69,7 +69,7 @@ export class ProvidersAdminController {
   /** قائمة مزوّدي المطوّر فقط */
   @Get('dev')
   @Roles(UserRole.ADMIN, UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
-  async listDevProviders() {
+  async listDevProviders(@Req() req: any) {
     const items = await this.integrations.list(null, 'dev');
     return { ok: true, items };
   }

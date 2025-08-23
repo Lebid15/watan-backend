@@ -25,7 +25,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       // To avoid larger refactor, we'll just permit null tenantId for all roles temporarily (security acceptable if other guards restrict tenant routes)
       // throw new UnauthorizedException('بيانات التوكن غير صالحة: tenantId مفقود لهذا الدور');
     }
-    return {
+  return {
       id: payload.sub,
       sub: payload.sub,
       email: payload.email,

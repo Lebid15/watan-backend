@@ -266,7 +266,14 @@ export class CatalogImportService {
 
     if (type.includes('znet')) {
       drv = new ZnetProvider(this.http) as unknown as ProviderDriverLike;
-    } else if (type.includes('barakat') || type.includes('brkt') || type === 'barakat') {
+    } else if (
+      type.includes('barakat') ||
+      type.includes('brkt') ||
+      type === 'barakat' ||
+      type.includes('apstore') ||
+      type === 'apstore'
+    ) {
+      // ملاحظة: apstore يستخدم نفس بروتوكول barakat لذا نعيد استخدام نفس السائق
       drv = new BarakatProvider(this.http) as unknown as ProviderDriverLike;
     } else {
       throw new BadRequestException(`Unknown provider type for catalog fetch: "${type}"`);
