@@ -313,46 +313,9 @@ async function bootstrap() {
 
   // ================= Bootstrap Developer (Global) =================
   // مفعّل افتراضياً مع BOOTSTRAP_ENABLED، ويستخدم INITIAL_DEV_EMAIL + INITIAL_DEV_PASSWORD
-  if ((process.env.BOOTSTRAP_ENABLED || 'true').toLowerCase() === 'true') {
-    try {
-      const devEmail = process.env.INITIAL_DEV_EMAIL;
-      const devPassword = process.env.INITIAL_DEV_PASSWORD;
-  console.log('[BOOTSTRAP][DEV] Env present?', { email: !!devEmail, password: devPassword ? '***' : false, reset: (process.env.RESET_DEV_ON_DEPLOY||'false').toLowerCase() });
-      if (devEmail && devPassword) {
-        const userRepo = dataSource.getRepository(User);
-        const existingDev = await userRepo.createQueryBuilder('u')
-          .where('u.email = :email', { email: devEmail })
-          .andWhere('u.role = :role', { role: 'developer' })
-          .andWhere('u.tenantId IS NULL')
-          .getOne();
-        if (!existingDev) {
-          const hash = await bcrypt.hash(devPassword, 10);
-          const newDev = userRepo.create({
-            email: devEmail,
-            password: hash,
-            role: 'developer',
-            tenantId: null,
-            isActive: true,
-            balance: 0,
-          } as any);
-          await userRepo.save(newDev);
-          console.log('✅ Bootstrap developer user created:', { email: devEmail });
-          const verifyDev = await userRepo.findOne({ where: { email: devEmail, tenantId: null as any } as any });
-          console.log('[BOOTSTRAP][DEV] Post-create verification exists?', !!verifyDev);
-        } else if ((process.env.RESET_DEV_ON_DEPLOY || 'false').toLowerCase() === 'true') {
-          existingDev.password = await bcrypt.hash(devPassword, 10);
-          await userRepo.save(existingDev);
-          console.log('🔄 Developer user password reset');
-        } else {
-          console.log('ℹ️ Developer user already exists');
-        }
-      } else {
-  console.log('ℹ️ Skipping developer bootstrap (missing INITIAL_DEV_EMAIL or INITIAL_DEV_PASSWORD). لضبطه أضف في Render: INITIAL_DEV_EMAIL, INITIAL_DEV_PASSWORD ثم أعد النشر.');
-      }
-    } catch (e: any) {
-      console.error('❌ Bootstrap developer user failed:', e?.message || e);
-    }
-  }
+  // (أزيل من التشغيل التلقائي) تم تعطيل إنشاء المطوّر تلقائياً.
+  // الآن الإنشاء يتم فقط عبر endpoint: POST /api/auth/bootstrap-developer
+  // يمكنك حذف متغيرات INITIAL_DEV_EMAIL و INITIAL_DEV_PASSWORD و RESET_DEV_ON_DEPLOY من البيئة.
 
   await app.listen(port, host);
 

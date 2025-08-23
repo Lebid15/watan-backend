@@ -259,10 +259,13 @@ export class UserService {
     return { ok: true, overdraftLimit: Number(user.overdraftLimit) };
   }
 
-  async getProfileWithCurrency(userId: string, tenantId: string) {
-    const user = await this.usersRepository.findOne({ where: { id: userId, tenantId }, relations: ['currency'] });
+  async getProfileWithCurrency(userId: string, tenantId?: string | null) {
+    let user = await this.usersRepository.findOne({ where: { id: userId, tenantId } as any, relations: ['currency'] });
+    if (!user && (tenantId === undefined || tenantId === null)) {
+      // محاولة الحصول على مستخدم عالمي (tenantId IS NULL)
+      user = await this.usersRepository.findOne({ where: { id: userId, tenantId: null } as any, relations: ['currency'] });
+    }
     if (!user) throw new NotFoundException('المستخدم غير موجود');
-
     return {
       id: user.id,
       email: user.email,

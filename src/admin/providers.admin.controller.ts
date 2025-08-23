@@ -43,8 +43,8 @@ export class ProvidersAdminController {
   @Post('dev')
   @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
   async createDevProvider(@Req() _req: any, @Body() dto: CreateIntegrationDto) {
-    // create يتطلب (tenantId, dto). لكونه dev نمرر '' كتنانت محايد.
-    const item = await this.integrations.create('', { ...dto, scope: 'dev' } as any);
+    // الآن service يحوّل tenantId إلى معرف ثابت داخلي عند scope=dev
+    const item = await this.integrations.create('ignored-dev', { ...dto, scope: 'dev' } as any);
     return { ok: true, item };
   }
 
@@ -52,7 +52,6 @@ export class ProvidersAdminController {
   @Get('dev')
   @Roles(UserRole.ADMIN, UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
   async listDevProviders() {
-    // list يتطلب (tenantId, scope?) - للمطورين نمرر null بدلاً من سلسلة فارغة
     const items = await this.integrations.list(null, 'dev');
     return { ok: true, items };
   }
@@ -65,7 +64,7 @@ export class ProvidersAdminController {
     @Body() dto: UpdateIntegrationDto,
   ) {
     // get الآن قد يتطلب tenantId — لكونه dev نمرر null
-    const item = await this.integrations.get(id, null);
+  const item = await this.integrations.get(id, null);
     if (!item || (item as any).scope !== 'dev') {
       throw new BadRequestException('Not a developer provider');
     }
@@ -79,7 +78,7 @@ export class ProvidersAdminController {
   @Roles(UserRole.DEVELOPER, UserRole.INSTANCE_OWNER)
   async deleteDevProvider(@Param('id') id: string) {
     // get قد يتطلب tenantId — dev → null
-    const item = await this.integrations.get(id, null);
+  const item = await this.integrations.get(id, null);
     if (!item || (item as any).scope !== 'dev') {
       throw new BadRequestException('Not a developer provider');
     }

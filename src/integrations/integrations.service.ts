@@ -17,6 +17,9 @@ import { PackageCost } from './package-cost.entity';
 import { CodeGroup } from '../codes/entities/code-group.entity';
 import { CodeItem } from '../codes/entities/code-item.entity';
 
+// ثابت يستخدم لتمييز تكوينات المزودين الخاصة بالمطور (scope=dev) دون الحاجة لجعل الحقل nullable في الجدول
+export const DEV_GLOBAL_TENANT_ID = '00000000-0000-0000-0000-000000000000';
+
 @Injectable()
 export class IntegrationsService {
   constructor(
@@ -93,8 +96,10 @@ export class IntegrationsService {
       scope?: 'tenant' | 'dev';
     },
   ) {
+    // لو scope=dev نستخدم معرف ثابت بدل تمرير '' أو null (العمود NOT NULL)
+    const effectiveTenantId = dto.scope === 'dev' ? DEV_GLOBAL_TENANT_ID : tenantId;
     const entity = this.integrationRepo.create({
-      tenantId,
+      tenantId: effectiveTenantId,
       scope: dto.scope ?? ('tenant' as any),
       ...dto,
     } as any);
@@ -103,7 +108,9 @@ export class IntegrationsService {
 
   list(tenantId: string | null, scope?: 'tenant' | 'dev') {
     const where: any = {};
-    if (tenantId !== null) {
+    if (tenantId === null && scope === 'dev') {
+      where.tenantId = DEV_GLOBAL_TENANT_ID;
+    } else if (tenantId !== null) {
       where.tenantId = tenantId;
     }
     if (scope) where.scope = scope;
@@ -112,7 +119,11 @@ export class IntegrationsService {
 
   async get(id: string, tenantId: string | null) {
     const where: any = { id };
-    if (tenantId !== null) {
+    if (tenantId === null) {
+      // محاولة أولى كـ dev
+      const dev = await this.integrationRepo.findOne({ where: { id, tenantId: DEV_GLOBAL_TENANT_ID } as any });
+      if (dev) return dev;
+    } else {
       where.tenantId = tenantId;
     }
     const cfg = await this.integrationRepo.findOne({ where });
