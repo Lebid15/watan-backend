@@ -24,6 +24,9 @@ import { TenantContextMiddleware } from './tenants/tenant-context.middleware';
 import { HealthController } from './health/health.controller';
 import { TenantGuard } from './tenants/tenant.guard';
 import { RateLimiterRegistry, RateLimitGuard } from './common/rate-limit.guard';
+import { ErrorsModule } from './dev/errors.module';
+import { APP_FILTER } from '@nestjs/core';
+import { AllExceptionsFilter } from './dev/all-exceptions.filter';
 
 @Module({
   imports: [
@@ -69,11 +72,13 @@ import { RateLimiterRegistry, RateLimitGuard } from './common/rate-limit.guard';
     CodesModule,
     TenantsModule,
     AuditModule,
+  ErrorsModule,
     TypeOrmModule.forFeature([Tenant, TenantDomain]),
   ],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useClass: TenantGuard },
+    { provide: APP_FILTER, useClass: AllExceptionsFilter },
     RateLimiterRegistry,
     RateLimitGuard,
   ],

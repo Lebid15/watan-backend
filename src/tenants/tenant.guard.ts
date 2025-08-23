@@ -33,6 +33,8 @@ const NO_TENANT_REQUIRED_PATHS: RegExp[] = [
   /^\/api\/admin\/tenants(\/|$)/,
   // Global stats (developer / instance owner overview)
   /^\/api\/admin\/stats(\/|$)/,
+  // Developer error monitoring
+  /^\/api\/dev\/errors(\/|$)/,
 ];
 
 @Injectable()
