@@ -12,6 +12,7 @@ export class PasskeysService {
   private rpName = 'Watan';
   private rpOrigin: string;
   private prod: boolean;
+  private enabled: boolean; // disable gracefully if required env missing in prod
 
   constructor(
   @InjectRepository(PasskeyCredential) private creds: Repository<PasskeyCredential>,
@@ -21,9 +22,20 @@ export class PasskeysService {
     this.prod = (process.env.NODE_ENV === 'production');
     this.rpId = process.env.RP_ID || 'localhost';
     this.rpOrigin = process.env.RP_ORIGIN || 'http://localhost:3000';
+    const strict = process.env.PASSKEYS_STRICT === 'true';
     if (this.prod && (!process.env.RP_ID || !process.env.RP_ORIGIN)) {
-      throw new Error('RP_ID and RP_ORIGIN required in production for WebAuthn');
+      if (strict) {
+        // Explicitly require configuration
+        throw new Error('RP_ID and RP_ORIGIN required in production for WebAuthn (PASSKEYS_STRICT=true)');
+      } else {
+        // Soft-disable feature instead of crashing whole app
+        // eslint-disable-next-line no-console
+        console.warn('[Passkeys] Disabled: missing RP_ID / RP_ORIGIN in production. Set PASSKEYS_STRICT=true to enforce.');
+        this.enabled = false;
+        return;
+      }
     }
+    this.enabled = true;
   }
 
   async getUserCredentials(userId: string) {
@@ -31,6 +43,7 @@ export class PasskeysService {
   }
 
   async startRegistration(user: any) {
+  if (!this.enabled) throw new BadRequestException('Passkeys disabled');
     const existing = await this.getUserCredentials(user.id);
     const composite = await this.challenges.create('reg', user.id); // id.challenge
     const [challengeRef, challenge] = composite.split('.', 2);
@@ -64,6 +77,7 @@ export class PasskeysService {
   }
 
   async finishRegistration(user: any, payload: any, tenantId: string | null) {
+  if (!this.enabled) throw new BadRequestException('Passkeys disabled');
     const { response, challengeRef } = payload || {};
     if (!response || !challengeRef) throw new BadRequestException('Missing response or challengeRef');
     const challenge = await this.challenges.consumeById(challengeRef, 'reg', user.id);
@@ -91,6 +105,7 @@ export class PasskeysService {
   }
 
   async startAuthentication(user: any) {
+  if (!this.enabled) throw new BadRequestException('Passkeys disabled');
     const creds = await this.getUserCredentials(user.id);
     if (!creds.length) throw new NotFoundException('No passkeys');
     const composite = await this.challenges.create('auth', user.id);
@@ -106,6 +121,7 @@ export class PasskeysService {
   }
 
   async finishAuthentication(user: any, payload: any) {
+  if (!this.enabled) throw new BadRequestException('Passkeys disabled');
     const { response, challengeRef } = payload || {};
     if (!response || !challengeRef) throw new BadRequestException('Missing response or challengeRef');
     const challenge = await this.challenges.consumeById(challengeRef, 'auth', user.id);
@@ -138,10 +154,12 @@ export class PasskeysService {
   }
 
   async list(userId: string) {
+  if (!this.enabled) return [];
     return this.creds.find({ where: { userId } });
   }
 
   async delete(userId: string, id: string) {
+  if (!this.enabled) throw new BadRequestException('Passkeys disabled');
     const cred = await this.creds.findOne({ where: { id, userId } });
     if (!cred) throw new NotFoundException('Credential not found');
   await this.creds.remove(cred);
