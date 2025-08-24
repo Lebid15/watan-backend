@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Not } from 'typeorm';
+import { randomUUID } from 'crypto';
 
 import { Tenant } from './tenant.entity';
 import { TenantDomain } from './tenant-domain.entity';
@@ -57,7 +58,9 @@ export class TenantsService {
     if (exists) throw new BadRequestException('الكود مستخدم من قبل');
 
     // 1) تجهيز سجل المتجر
-    const t = this.tenants.create({ ...dto, isActive: dto.isActive ?? true });
+  const t = this.tenants.create({ ...dto, isActive: dto.isActive ?? true });
+  // فfallback: لو لم يضبط الـ DB default للـ id (حالة إنتاج قديمة) نولّد UUID يدوياً
+  if (!(t as any).id) (t as any).id = randomUUID();
 
     let ownerPlainPassword: string | undefined;
 
@@ -105,6 +108,7 @@ export class TenantsService {
       isPrimary: true,
       isVerified: true, // محليًا نعتبره متحققًا
     } as Partial<TenantDomain>) as TenantDomain;
+    if (!(domainEntity as any).id) (domainEntity as any).id = randomUUID();
 
     await this.domains.save(domainEntity);
 
